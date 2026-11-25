@@ -1,5 +1,7 @@
 # Ranger CAN Explorer
 
+[![Listed on AlsoBuilt](https://img.shields.io/badge/AlsoBuilt-listed-6366f1?style=flat-square)](https://alsobuilt.pages.dev/?cat=hardware-embedded)
+
 An interactive 3D explorer of the in-vehicle networks of a **Ford Ranger Wildtrak, PX2/PX3 generation (2016 facelift to 2022)**.
 It shows how the modules (ECUs) exchange information over CAN, with protocol mechanics modelled on **ISO 11898**,
 plus a note on how the **2022+ next-generation Ranger** differs.
