@@ -11,7 +11,7 @@ const a = src.indexOf('// ===== CORE-BEGIN'), b = src.indexOf('// ===== CORE-END
 if (a < 0 || b < 0) throw new Error('core markers not found');
 const code = src.slice(a, b);
 const ctx = vm.createContext({ console, Math, Map, Object, Array, String, Number, JSON, Infinity, parseInt });
-vm.runInContext(code + `\n;globalThis.__C = { SIM, BUS, NODE, V, LOG, MSGS, CORE, TOOL, frameBits, crc15, coreInit, runUntil, txq, encode, decode, rxv, busLoad, toolRequest, decodeDiag, setIgn, fob, triggerCrash, repairAll, babbleLoop, crankEngine, dtcBytes, dtcFromBytes, linPid, linChecksum, listeners, HEX, hexs };`, ctx);
+vm.runInContext(code + `\n;globalThis.__C = { SIM, BUS, NODE, V, LOG, MSGS, CORE, TOOL, frameBits, crc15, coreInit, runUntil, txq, encode, decode, rxv, busLoad, toolRequest, refuel, pcmFuelSender, decodeDiag, setIgn, fob, triggerCrash, repairAll, babbleLoop, crankEngine, dtcBytes, dtcFromBytes, linPid, linChecksum, listeners, HEX, hexs };`, ctx);
 const C = ctx.__C;
 
 let pass = 0, fail = 0;
@@ -177,6 +177,36 @@ section('Crash event and remote start');
   ok(quiet === 0, 'networks asleep with ignition off (no frames after 1.5 s)');
   C.fob('lock'); C.runUntil(4.3); C.fob('start'); C.runUntil(7);
   ok(C.V.eng && C.V.remote, 'remote start: wake, BCM checks gear P via the gateway, PATS handshake, engine runs');
+}
+
+section('Fuel level management');
+{
+  C.coreInit(11); C.runUntil(2);
+  const ipc = C.NODE.IPC.st;
+  ok(Math.abs(ipc.gauge - C.V.fuel) < 2, `IPC gauge initialises from the PCM's raw level (${ipc.gauge.toFixed(1)} % vs truth ${C.V.fuel.toFixed(1)} %)`);
+  C.V.sel = 'D'; C.V.autoSpd = 90; C.runUntil(25);
+  const g0 = ipc.gauge; let rawMin = 100, rawMax = 0, gMin = 100, gMax = 0;
+  C.V.autoSpd = 0; C.V.brk = 100;
+  for (let t = 25; t < 30; t += 0.05) { C.runUntil(t); const r = C.rxv('IPC', 0x120).v.FuelLevel; rawMin = Math.min(rawMin, r); rawMax = Math.max(rawMax, r); gMin = Math.min(gMin, ipc.gauge); gMax = Math.max(gMax, ipc.gauge); }
+  ok(rawMax - rawMin > 8, `hard braking sloshes the raw sender reading by ${(rawMax - rawMin).toFixed(1)} %`);
+  ok(gMax - gMin < 1.5, `the IPC's damped gauge moves only ${(gMax - gMin).toFixed(2)} % (anti-slosh filter)`);
+  const f = C.decode(0x3C0, C.NODE.APIM.rx[0x3C0].d);
+  ok(f.RangeKm > 300 && f.RangeKm < 700 && f.AvgCons > 4 && f.AvgCons < 20, `IPC_Info: range ${f.RangeKm} km, average ${f.AvgCons.toFixed(1)} L/100 km, gauge ${f.FuelGauge.toFixed(0)} %`);
+  C.V.brk = 0; C.V.sel = 'D'; C.V.autoSpd = 60; C.V.fuelMult = 200; let tt = 30; while (!ipc.lowFuel && tt < 4000) { tt += 1; C.runUntil(tt); }
+  ok(ipc.lowFuel && C.decode(0x3C0, C.NODE.APIM.rx[0x3C0].d).LowFuel === 1, `low-fuel warning raised at ${(ipc.gauge * 0.8).toFixed(1)} L on the gauge (truth ${C.V.fuelL.toFixed(1)} L)`);
+  while (C.V.eng && tt < 5000) { tt += 1; C.runUntil(tt); }
+  ok(!C.V.eng && C.V.fuelL === 0, 'engine stops when the tank runs dry');
+  C.V.autoSpd = 0; C.V.brk = 100; C.runUntil(tt + 15); C.V.brk = 0; C.V.fuelMult = 1;
+  const before = ipc.gauge; C.refuel(70); C.runUntil(tt + 21);
+  ok(ipc.gauge - before > 60, `refuel while stationary: the IPC fast-fills (${before.toFixed(0)} → ${ipc.gauge.toFixed(0)} % in 6 s instead of ~minutes)`);
+  C.V.sender = 'open'; C.runUntil(tt + 23);
+  ok(C.NODE.PCM.dtc.has('P0463') && C.rxv('IPC', 0x120).v.SenderFault === 'open' && !ipc.fuelValid, 'sender open circuit: PCM sets P0463, flags SenderFault=open, IPC gauge invalid');
+  let got = null; C.toolRequest('OBD', [0x03], (r) => (got = r)); C.runUntil(tt + 23.3);
+  ok(got && C.decodeDiag([3], got, 0x7e8).includes('P0463'), 'OBD mode 03 reports P0463');
+  C.V.sender = 'ok'; got = null; C.toolRequest('OBD', [0x01, 0x2f], (r) => (got = r)); C.runUntil(tt + 23.6);
+  ok(got && got[1] === 0x2f && Math.abs(got[2] * 100 / 255 - C.V.fuel) < 3, 'OBD PID 2F (fuel tank level input) = ' + C.decodeDiag([1, 0x2f], got, 0x7e8));
+  got = null; C.toolRequest('OBD', [0x01, 0x00], (r) => (got = r)); C.runUntil(tt + 23.9);
+  ok(got && (got[5] & 1) === 1, 'PID 00 bitmap flags PID 20 (more PIDs supported in the next range)');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

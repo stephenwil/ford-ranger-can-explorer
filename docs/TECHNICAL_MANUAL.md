@@ -19,6 +19,7 @@ Contents
 12. Next-generation Ranger (2022+)
 13. How the simulation works
 14. Limits of the model
+15. Fuel level management
 
 ---
 
@@ -234,6 +235,7 @@ Routes in the model (illustrative):
 | 0F0 | PCM_Engine | HS1 | HS2, HS3 |
 | 110 | TCM_Gear | HS1 | HS2, HS3, MS |
 | 120 | PCM_Engine2 | HS1 | HS3, MS |
+| 128 | PCM_FuelFlow | HS1 | HS3 |
 | 130 | TC4_Status | HS1 | HS3 |
 | 331 | PCM_PATS | HS1 | MS |
 | 0C8 | CCM_ACC | HS2 | HS1, HS3 |
@@ -267,12 +269,13 @@ not Ford's.
 | 100 | PCM_TorqueCoord | PCM | HS1 | 10 ms | actual, maximum and minimum torque |
 | 110 | TCM_Gear | TCM | HS1 | 20 ms | Selector PRNDM, GearActual (0 N, 1–10, 15 R), lockup, temperature |
 | 118 | TCM_TorqueReq | TCM | HS1 | 10 ms | torque reduction request, output shaft rpm |
-| 120 | PCM_Engine2 | PCM | HS1 | 100 ms | coolant, fuel level, MIL, outside temperature, FuelCut |
+| 120 | PCM_Engine2 | PCM | HS1 | 100 ms | coolant, raw fuel level, SenderOhms, SenderFault, MIL, outside temperature, FuelCut |
+| 128 | PCM_FuelFlow | PCM | HS1 | 100 ms | FuelRate 0.05 L/h, FuelUsed rolling 16-bit mL counter, fuel temperature |
 | 130 | TC4_Status | 4×4 | HS1 | 100 ms | Mode4x4, ShiftInProg, LockerActive, ShiftDenied |
 | 331 | PCM_PATS | PCM | HS1 | event | immobiliser response |
 | 0C8 | CCM_ACC | CCM | HS2 | 20 ms | AccState, target distance and relative speed, AccelReq, SetSpeed, FCW |
 | 0D0 | IPMA_Lane | IPMA | HS2 | 50 ms | lanes, LkaState, LDW, lateral offset, torque request, auto high beam |
-| 3C0 | IPC_Info | IPC | HS3 | 200 ms | odometer, range |
+| 3C0 | IPC_Info | IPC | HS3 | 200 ms | odometer, damped FuelGauge, RangeKm, AvgCons, LowFuel, chime request |
 | 400 | APIM_Status | APIM | HS3 | 100 ms | screen, EmergCall |
 | 410 | ACM_Status | ACM | HS3 | 200 ms | source, volume |
 | 330 | BCM_PATS | BCM | MS | event | challenge / start authorisation |
@@ -334,6 +337,9 @@ The Diagnostics tab lets you choose the tester's BS and STmin and shows every fr
 | `01 0C` | `41 0C A B` | RPM = (256A + B) / 4 |
 | `01 0D` | `41 0D A` | km/h. The PCM reports the ABS speed it **received** (0 if stale) |
 | `01 05` | `41 05 A` | °C = A − 40 |
+| `01 20` / `01 40` | `41 20/40 A B C D` | next PID-support bitmaps (2F; 5E). The last bit of each bitmap says the next range exists |
+| `01 2F` | `41 2F A` | fuel tank level input = A·100/255 % (the PCM's sender reading) |
+| `01 5E` | `41 5E A B` | engine fuel rate = (256A + B)/20 L/h |
 | `03` | `43 n DTC…` | stored emission (P) codes, 2 bytes each |
 | `09 02` | `49 02 01 VIN` | multi-frame. The VIN is deliberately fake: `SIMRANGERPX300001` |
 | `10 03` | `50 03 00 32 01 F4` | extended session, P2 = 50 ms, P2* = 5000 ms |
@@ -449,3 +455,47 @@ simplifies what a real ISO 11898-2 transceiver in standby with remote wake-up do
   frames and wake lines.
 - The PATS exchange and the safety checksum are made up and have nothing to do with Ford's security mechanisms.
 - The vehicle dynamics are deliberately simple; the network is the subject.
+
+## 15. Fuel level management
+
+Ford's real values are not public. The chain below follows common automotive practice; the numbers are illustrative.
+
+```
+ float + resistor card ──wire──▶ PCM ──HS-CAN1──▶ GWM ──HS-CAN3──▶ IPC ──▶ needle, range, low-fuel lamp
+ (in the 80 L tank)              │   0x120 raw level, SenderOhms, SenderFault       │   0x3C0 FuelGauge, RangeKm,
+                                 │   0x128 FuelRate, FuelUsed (mL counter)          │   AvgCons, LowFuel, chime
+                                 └── circuit check → P0462 / P0463, OBD PIDs 2F, 5E
+```
+
+**Sender.** A float on an arm moves a wiper along a resistor card. In the model the resistance runs from 160 Ω (empty) to
+15 Ω (full), through a slightly non-linear tank-height curve. The sender is a hard-wired analog input to the PCM, not a CAN
+node, which is the usual arrangement for a single-sender diesel tank.
+
+**Slosh.** The free surface is modelled as a lightly damped oscillator (about 0.55 Hz, ζ ≈ 0.07). It is driven by
+longitudinal and lateral acceleration, plus a little road ripple. A hard stop from 90 km/h swings the float reading by
+roughly 25–30 percentage points.
+
+**PCM.** The PCM reads the resistance every 100 ms. Above 220 Ω it reports an open circuit: **P0463** "Fuel Level Sensor A
+Circuit High", `SenderFault = open`, level 0. Below 5 Ω it reports a short: **P0462** "Circuit Low". Otherwise it
+converts the resistance to a percentage and broadcasts it **unfiltered**. Separately it reports the fuel it commands in
+0x128: an instantaneous rate, and a rolling 16-bit millilitre counter that receivers difference (handling the wrap at
+65 536).
+
+**Cluster (IPC).**
+- *Initialisation:* on wake-up the gauge snaps to the current raw value.
+- *Anti-slosh damping:* a first-order filter with a time constant of about 40 s, so the needle ignores braking, cornering
+  and bumps. The test suite checks that a 27 % raw swing moves the gauge by less than 1 %.
+- *Fast-fill:* if the raw level stays more than 5 % above the gauge for 2 s while the ABS speed is below 2 km/h, the cluster
+  treats it as a refuel and uses a 1.5 s time constant until it has caught up.
+- *Consumption:* it integrates the 0x128 millilitre counter against distance from the ABS speed, and keeps an
+  exponentially weighted average in L/100 km. It also shows instantaneous L/100 km.
+- *Range (DTE):* (gauge litres − ~4 L hidden reserve) ÷ average × 100.
+- *Low fuel:* below ~11 L on the **damped** gauge, so a slosh cannot trigger it. Lamp, chime request, `LowFuel` in 0x3C0.
+- *Invalid data:* if 0x120 is missing or `SenderFault ≠ ok`, the cluster shows "---" and flashes the fuel lamp. It does not
+  show "empty", because it was told the reading is untrustworthy.
+
+**Running dry.** At 0 L the engine stops. A diesel may need its fuel system primed before it restarts.
+
+**Burn ×N (demo shortcut).** The multiplier drains the tank N× faster than the injected quantity reported in 0x128, so
+the learned average consumption and range keep realistic values. It also divides the cluster's 40 s filter by N, so the
+gauge keeps pace with the compressed time. At ×1 everything runs in real time.

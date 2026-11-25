@@ -80,9 +80,10 @@ const scen = await app(() => Object.fromEntries(Object.entries(__app.SCEN).map((
 for (const [k, n] of Object.entries(scen)) {
   await app((k) => __app.startScen(k), k); await page.waitForTimeout(900);
   if (!(await page.locator('#storyNext').isVisible())) console.log('    story box state:', await app(() => { const s = document.getElementById('story'); return JSON.stringify({ d: s.style.display, r: s.getBoundingClientRect(), errs: window.__errors }); }));
-  for (let i = 1; i < n; i++) { await page.click('#storyNext'); await page.waitForTimeout(k === 'remote' || k === 'drive4x4' || k === 'diag' ? 2200 : 900); }
+  for (let i = 1; i < n; i++) { await page.click('#storyNext'); await page.waitForTimeout(k === 'remote' || k === 'drive4x4' || k === 'diag' || k === 'fuel' ? 2200 : 900); }
   if (k === 'crash') await page.screenshot({ path: `${out}/08_crash.png` });
   if (k === 'remote') { const r = await app(() => ({ eng: __app.V.eng, remote: __app.V.remote })); ok(r.eng && r.remote, 'remote-start scenario ends with the engine running'); }
+  if (k === 'fuel') { let f = 0; for (let i = 0; i < 80 && f < 60; i++) { await page.waitForTimeout(500); f = await app(() => __app.V.fuelL); } const lw = await app(() => __app.LOG.some((e) => e.note && e.note.includes('LOW FUEL'))); ok(f >= 60, `fuel scenario ends refuelled (${f.toFixed(0)} L)`); await page.click('.tabs button[data-pane="cluster"]'); await page.waitForTimeout(500); await page.screenshot({ path: `${out}/10_fuel.png` }); }
   if (k === 'drive4x4') { let m = ''; for (let i = 0; i < 40 && m !== '4L'; i++) { await page.waitForTimeout(250); m = await app(() => __app.V.mode); } ok(m === '4L', `4x4 scenario ends in ${m}`); }
   await page.click('#storyNext');
   const errs = await app(() => window.__errors.length);

@@ -198,6 +198,14 @@ canvas.scope{width:100%;display:block;background:#050a12;border:1px solid var(--
         <canvas id="cluster" width="880" height="470"></canvas>
         <div class="note" style="margin-top:6px">The cluster draws only what the IPC has <b>received over HS-CAN3</b>. Most of it was routed there by the gateway from the other buses. Each value is drawn grey with a <b style="color:var(--warn)">STALE</b> age once its message is more than 3 periods late. As real clusters do, the IPC lights the ABS, ESC and airbag telltales when it loses those modules' messages.</div>
       </div>
+      <div class="card" id="fuelCard">
+        <h3>Fuel level: sender → PCM → gateway → IPC <span class="tag" id="fuelTag">ok</span></h3>
+        <canvas class="scope" id="fuelChart" width="860" height="300"></canvas>
+        <div class="kv" id="fuelKV" style="margin-top:6px"></div>
+        <div class="row" style="margin-top:8px"><button class="b sm grn" id="refuelFull">⛽ Refuel to full</button><button class="b sm grn" id="refuel20">+20 L</button><span class="note">burn rate</span><div class="seg" id="burnSeg"><button class="b sm on" data-burn="1">×1</button><button class="b sm" data-burn="25">×25</button><button class="b sm" data-burn="100">×100</button></div></div>
+        <div class="row" style="margin-top:6px"><button class="b sm red" data-sender="open">Sender open circuit</button><button class="b sm red" data-sender="short">Sender shorted to ground</button><button class="b sm grn" data-sender="ok">Sender OK</button></div>
+        <div class="note" style="margin-top:6px">The float-and-resistor <b>sender</b> in the tank is wired to the <b>PCM</b>. The PCM checks the circuit (open circuit → P0463, shorted → P0462) and broadcasts the <b>raw</b> level in 0x120, which moves with every slosh, plus the injected fuel in 0x128. The <b>cluster</b> damps the raw level so the needle stays steady, fast-fills when it sees a refuel while stationary, learns the average consumption from 0x128 and the speed, and computes range and the low-fuel warning. Burn ×N drains the tank faster than the reported injection: a demo shortcut. Sender values (160 Ω empty … 15 Ω full) are illustrative.</div>
+      </div>
       <div class="card" id="ageCard"><h3>Signal freshness at the IPC <span class="note" id="ageSum"></span></h3><div id="ageList"></div></div>
       <div class="card">
         <h3>Driver controls (truth inputs → sensors → buses)</h3>
@@ -243,6 +251,7 @@ canvas.scope{width:100%;display:block;background:#050a12;border:1px solid var(--
         <button class="b scen" data-scen="crash"><b>10 · Crash event</b><small>The RCM fires the airbags and broadcasts a crash frame at high priority. The BCM unlocks and flashes the hazards, the PCM cuts fuel and SYNC calls for help.</small></button>
         <button class="b scen" data-scen="remote"><b>11 · Keyless entry and remote start</b><small>The fob's RF reaches the BCM. The BCM wakes the networks, runs its checks and the PATS handshake with the PCM, and the engine starts.</small></button>
         <button class="b scen" data-scen="diag"><b>12 · Diagnostics: OBD-II and UDS over ISO-TP</b><small>A mode 01 PID, a 20-byte VIN in multi-frame with flow control, then UDS 0x19 to read DTCs from a module behind the gateway.</small></button>
+        <button class="b scen" data-scen="fuel"><b>14 · Fuel level management</b><small>From float to needle: the PCM reads the sender and the cluster damps the slosh. Consumption, range, low-fuel warning, a sender open circuit (P0463), then refuel and fast-fill.</small></button>
         <button class="b scen" data-scen="drive4x4"><b>13 · 4×4 shift: 2H → 4H → 4L</b><small>The 4×4 module needs speed and gear over the bus before it moves the transfer case. 4L needs the truck stopped and in N.</small></button>
       </div>
       <div class="card note">Scenarios drive the same simulation you can play with. You can pause, change the time mode or open any tab while one runs. Use <b>Next ▶</b> to advance; each step waits for its events.</div>
@@ -279,6 +288,8 @@ canvas.scope{width:100%;display:block;background:#050a12;border:1px solid var(--
           <button class="b red" data-ev="crash">Frontal crash</button>
           <button class="b red" data-ev="gw">Gateway failure</button>
           <button class="b" data-ev="tyre">LF slow puncture</button>
+          <button class="b red" data-ev="fuelOpen">Fuel sender open circuit</button>
+          <button class="b grn" data-ev="refuel">Refuel to full</button>
           <button class="b grn" data-ev="repair" style="grid-column:span 2">Repair everything &amp; clear DTCs</button>
         </div>
       </div>
@@ -353,6 +364,8 @@ canvas.scope{width:100%;display:block;background:#050a12;border:1px solid var(--
           <button class="b" data-req="22F190">UDS 22 F190 · VIN</button>
           <button class="b" data-req="22F188">UDS 22 F188 · SW part no.</button>
           <button class="b" data-req="1902FF">UDS 19 02 FF · read DTCs</button>
+          <button class="b" data-req="012F">01 2F · fuel tank level</button>
+          <button class="b" data-req="015E">01 5E · engine fuel rate</button>
           <button class="b red" data-req="14FFFFFF">UDS 14 FFFFFF · clear DTCs</button>
         </div>
         <div class="row" style="margin-top:6px;font-size:12px">Tester flow control: BS <select class="b sm" id="fcBS"><option>0</option><option>1</option><option>2</option><option>4</option></select> STmin <select class="b sm" id="fcST"><option value="0">0 ms</option><option value="5">5 ms</option><option value="20">20 ms</option><option value="80">80 ms</option></select>
@@ -477,12 +490,13 @@ M(0x0F0, 'PCM_Engine', 'HS1', 'PCM', 10, [['EngRpm', 0, 16, 0.25, 0, 'rpm'], ['P
 M(0x100, 'PCM_TorqueCoord', 'HS1', 'PCM', 10, [['TqActual', 0, 16, 1, 0, 'Nm', true], ['TqMax', 16, 16, 1, 0, 'Nm', true], ['TqMin', 32, 16, 1, 0, 'Nm', true]], { rx: ['TCM', 'ABS'], d: 'Torque coordination for traction control and shift torque reduction.' });
 M(0x110, 'TCM_Gear', 'HS1', 'TCM', 20, [['Selector', 0, 3, 1, 0, '', false, EN_SEL], ['GearActual', 4, 4], ['GearTarget', 8, 4], ['TcLockup', 12, 1], ['ShiftInProg', 13, 1], ['TransTemp', 16, 8, 1, -40, '°C'], ['TcmFault', 24, 1]], { rx: ['PCM', 'ABS', 'TC4', 'IPC', 'BCM', 'PAM', 'CCM'], d: 'Selector position (PRND) and the gear engaged (0 = neutral, 15 = reverse).' });
 M(0x118, 'TCM_TorqueReq', 'HS1', 'TCM', 10, [['TqReduceReq', 0, 1], ['TqLimit', 8, 16, 1, 0, 'Nm', true], ['OutShaftRpm', 24, 16, 0.25, 0, 'rpm']], { rx: ['PCM'], d: 'Shift-time torque reduction request to the PCM.' });
-M(0x120, 'PCM_Engine2', 'HS1', 'PCM', 100, [['Coolant', 0, 8, 1, -40, '°C'], ['FuelLevel', 8, 8, 0.4, 0, '%'], ['Mil', 16, 1], ['GlowPlug', 17, 1], ['OilPressLow', 18, 1], ['ChargeFault', 19, 1], ['FuelCut', 20, 1], ['OutsideTemp', 24, 8, 0.5, -40, '°C']], { rx: ['IPC', 'HVAC'], d: 'Slow engine data: coolant, fuel level, outside air temperature and lamps.' });
+M(0x120, 'PCM_Engine2', 'HS1', 'PCM', 100, [['Coolant', 0, 8, 1, -40, '°C'], ['FuelLevel', 8, 8, 0.4, 0, '%'], ['Mil', 16, 1], ['GlowPlug', 17, 1], ['OilPressLow', 18, 1], ['ChargeFault', 19, 1], ['FuelCut', 20, 1], ['SenderFault', 21, 2, 1, 0, '', false, ['ok', 'open', 'short', '']], ['OutsideTemp', 24, 8, 0.5, -40, '°C'], ['SenderOhms', 32, 8, 1, 0, 'Ω']], { rx: ['IPC', 'HVAC'], d: 'Slow engine data: coolant, outside air temperature, lamps and the fuel level. FuelLevel is the PCM\'s raw (unfiltered) reading of the in-tank sender, so it moves with fuel slosh; SenderOhms and SenderFault come from the PCM\'s circuit check.' });
+M(0x128, 'PCM_FuelFlow', 'HS1', 'PCM', 100, [['FuelRate', 0, 16, 0.05, 0, 'L/h'], ['FuelUsed', 16, 16, 1, 0, 'mL'], ['FuelTemp', 32, 8, 1, -40, '°C']], { rx: ['IPC'], d: 'Fuel injected, as the PCM commands it: instantaneous rate and a rolling 16-bit counter of millilitres used (it wraps at 65 535). The cluster integrates it for average consumption and range.' });
 M(0x130, 'TC4_Status', 'HS1', 'TC4', 100, [['Mode4x4', 0, 2, 1, 0, '', false, ['2H', '4H', '4L', '--']], ['ShiftInProg', 2, 1], ['LockerActive', 3, 1], ['Fault4x4', 4, 1], ['ShiftDenied', 5, 3, 1, 0, '', false, ['ok', 'speed', 'not N', 'no data', '', '', '', '']]], { rx: ['IPC', 'ABS'], d: 'Transfer-case mode and e-locker state.' });
 M(0x331, 'PCM_PATS', 'HS1', 'PCM', 0, [['PatsStatus', 0, 8], ['Response', 8, 32]], { event: true, mon: false, rx: ['BCM'], d: 'Immobiliser response (event-driven).' });
 M(0x0C8, 'CCM_ACC', 'HS2', 'CCM', 20, [['AccState', 0, 3, 1, 0, '', false, ['off', 'standby', 'active', 'override', 'fault', 'unavail', '', '']], ['TargetDet', 3, 1], ['TargetDist', 8, 8, 0.5, 0, 'm'], ['RelSpeed', 16, 8, 0.5, 0, 'km/h', true], ['AccelReq', 24, 8, 0.05, 0, 'm/s²', true], ['SetSpeed', 32, 8, 1, 0, 'km/h'], ['FcwAlert', 40, 1]], { safe: true, rx: ['PCM', 'ABS', 'IPC'], d: 'Adaptive-cruise state and acceleration request. The gateway forwards it to HS-CAN1 for the PCM (throttle) and ABS (braking).' });
 M(0x0D0, 'IPMA_Lane', 'HS2', 'IPMA', 50, [['LaneLeft', 0, 1], ['LaneRight', 1, 1], ['LkaState', 2, 2, 1, 0, '', false, ['off', 'standby', 'active', 'unavail']], ['LdwAlert', 4, 1], ['LatOffset', 8, 8, 0.01, 0, 'm', true], ['LkaTorqueReq', 16, 8, 0.02, 0, 'Nm', true], ['AutoHighBeam', 24, 1]], { safe: true, rx: ['PSCM', 'IPC', 'BCM'], d: 'Lane detection, lane-keeping torque request and auto high-beam request.' });
-M(0x3C0, 'IPC_Info', 'HS3', 'IPC', 200, [['Odometer', 0, 24, 0.1, 0, 'km'], ['ChimeReq', 24, 4], ['RangeKm', 32, 16, 1, 0, 'km']], { rx: ['APIM'], d: 'Odometer and distance-to-empty.' });
+M(0x3C0, 'IPC_Info', 'HS3', 'IPC', 200, [['Odometer', 0, 24, 0.1, 0, 'km'], ['ChimeReq', 24, 4], ['LowFuel', 28, 1], ['FuelGaugeValid', 29, 1], ['RangeKm', 32, 16, 1, 0, 'km'], ['FuelGauge', 48, 8, 0.4, 0, '%'], ['AvgCons', 56, 8, 0.1, 0, 'L/100km']], { rx: ['APIM'], d: 'Odometer and the cluster\'s own fuel results: damped gauge level, distance to empty, average consumption and the low-fuel warning.' });
 M(0x400, 'APIM_Status', 'HS3', 'APIM', 100, [['Screen', 0, 2, 1, 0, '', false, ['off', 'on', 'camera', 'call']], ['EmergCall', 2, 2, 1, 0, '', false, ['idle', 'dialling', 'connected', 'failed']], ['PhoneLinked', 4, 1], ['VolReq', 8, 6]], { rx: ['ACM', 'IPC'], d: 'SYNC 3 state, including Emergency Assistance.' });
 M(0x410, 'ACM_Status', 'HS3', 'ACM', 200, [['Source', 0, 3, 1, 0, '', false, ['off', 'FM', 'AM', 'USB', 'BT', '', '', '']], ['Mute', 3, 1], ['Volume', 8, 6]], { rx: ['APIM'], d: 'Audio source and volume.' });
 M(0x330, 'BCM_PATS', 'MS', 'BCM', 0, [['PatsCmd', 0, 8], ['Challenge', 8, 32]], { event: true, mon: false, rx: ['PCM'], d: 'Immobiliser challenge / start authorisation (event-driven).' });
@@ -498,7 +512,7 @@ M(0x3F0, 'TRM_Status', 'MS', 'TRM', 500, [['TrlConnected', 0, 1], ['LampFault', 
 // gateway routing table (illustrative): which frames cross which buses
 const ROUTES = [
   [0x070, 'HS1', ['HS3', 'MS']], [0x090, 'HS1', ['HS2']], [0x0A0, 'HS1', ['HS2', 'HS3', 'MS']], [0x0B0, 'HS1', ['HS2']],
-  [0x0F0, 'HS1', ['HS2', 'HS3']], [0x110, 'HS1', ['HS2', 'HS3', 'MS']], [0x120, 'HS1', ['HS3', 'MS']], [0x130, 'HS1', ['HS3']],
+  [0x0F0, 'HS1', ['HS2', 'HS3']], [0x128, 'HS1', ['HS3']], [0x110, 'HS1', ['HS2', 'HS3', 'MS']], [0x120, 'HS1', ['HS3', 'MS']], [0x130, 'HS1', ['HS3']],
   [0x331, 'HS1', ['MS']], [0x0C8, 'HS2', ['HS1', 'HS3']], [0x0D0, 'HS2', ['HS1', 'HS3', 'MS']],
   [0x330, 'MS', ['HS1']], [0x340, 'MS', ['HS1', 'HS2', 'HS3']], [0x3A0, 'MS', ['HS3']], [0x3B0, 'MS', ['HS3']], [0x3B8, 'MS', ['HS3']],
   [0x3C8, 'MS', ['HS3']], [0x3D0, 'MS', ['HS1', 'HS3']], [0x3E0, 'MS', ['HS1', 'HS3']], [0x3F0, 'MS', ['HS1', 'HS3']],
@@ -517,6 +531,7 @@ const DTC_TEXT = {
   'U0256*': 'Lost Communication With camera module (illustrative code)', 'U0257*': 'Lost Communication With SYNC APIM (illustrative code)', 'U0313*': 'Lost Communication With trailer module (illustrative code)',
   U0415: 'Invalid Data Received From Anti-Lock Brake System (ABS) Control Module', U0420: 'Invalid Data Received From Power Steering Control Module',
   C0035: 'Left Front Wheel Speed Sensor Circuit', C0040: 'Right Front Wheel Speed Sensor Circuit', P0500: 'Vehicle Speed Sensor "A"',
+  P0460: 'Fuel Level Sensor "A" Circuit', P0462: 'Fuel Level Sensor "A" Circuit Low', P0463: 'Fuel Level Sensor "A" Circuit High',
   B0001: 'Driver Frontal Stage 1 Deployment Control (deployed)', B1D00: 'Crash event stored (illustrative)', C1A00: 'Trailer lamp circuit (illustrative)',
 };
 function dtcBytes(code) { const c = code.replace('*', ''); const L = { P: 0, C: 1, B: 2, U: 3 }[c[0]]; const v = (L << 14) | (parseInt(c[1], 16) << 12) | (parseInt(c[2], 16) << 8) | (parseInt(c[3], 16) << 4) | parseInt(c[4], 16); return [v >> 8, v & 255]; }
@@ -680,7 +695,7 @@ const TYRE_C = 2.435; // m, 265/60R18 rolling circumference (approx.)
 const V = {};
 function resetTruth() {
   Object.assign(V, { variant: 'px3', ign: 'RUN', eng: true, crank: 0, rpm: 800, v: 0, odo: 48213.4, thr: 0, brk: 0, steer: 0, sel: 'P', gear: 0, shiftT: 0,
-    coolant: 86, transT: 68, fuel: 64, oat: 24, mode: '2H', modeReq: '2H', modeShift: 0, modeDeny: 'ok', locker: false, lockerReq: false,
+    coolant: 86, transT: 68, fuel: 64, fuelL: 51, tankL: 80, fuelRate: 0, fuelUsedMl: 0, fuelMult: 1, slosh: 0, sloshV: 0, sender: 'ok', fuelT: 24, oat: 24, mode: '2H', modeReq: '2H', modeShift: 0, modeDeny: 'ok', locker: false, lockerReq: false,
     doors: [0, 0, 0, 0, 0, 0], locked: false, lockEvt: 'none', lockEvtT: -9, lights: 'AUTO', haz: false, turnL: false, turnR: false, lux: 600, rain: 0,
     hvacT: 21, fan: 3, ac: true, cabin: 26, tyres: [240, 240, 240, 240], trailer: false, belt: true,
     acc: { on: false, set: false, setSpd: 0, state: 'off' }, lead: 0, leadV: 70 / 3.6, obst: 250, autoSpd: 0,
@@ -690,7 +705,7 @@ function resetTruth() {
 function step(dt) {
   const vt = VARIANTS[V.variant]; const kmh = Math.abs(V.v) * 3.6;
   // engine start / stop
-  if (V.crank > 0) { V.crank -= dt; V.rpm = 220 + 60 * Math.sin(SIM.t * 40); if (V.crank <= 0) { V.crank = 0; V.eng = V.patsOk && !V.fuelCut; if (!V.eng) log({ kind: 'info', note: 'Engine cranked but did not start: the PCM has no start authorisation (PATS) or the fuel is cut' }); } }
+  if (V.crank > 0) { V.crank -= dt; V.rpm = 220 + 60 * Math.sin(SIM.t * 40); if (V.crank <= 0) { V.crank = 0; V.eng = V.patsOk && !V.fuelCut && V.fuelL > 0.3; if (!V.eng) log({ kind: 'info', note: V.fuelL <= 0.3 ? 'Engine cranked but did not start: the tank is empty (a diesel may also need its fuel system primed)' : 'Engine cranked but did not start: the PCM has no start authorisation (PATS) or the fuel is cut' }); } }
   if (V.fuelCut && V.eng) { V.eng = false; }
   if (V.ign === 'OFF' && V.eng && !V.remote) V.eng = false;
   if (V.remote && SIM.t > V.remoteUntil) { V.remote = false; V.eng = false; V.ign = 'OFF'; setIgn('OFF'); log({ kind: 'info', note: 'Remote-start timer expired: the BCM drops the power mode to OFF' }); }
@@ -740,7 +755,7 @@ function step(dt) {
   V.odo += Math.abs(V.v) * dt / 1000;
   V.coolant += ((V.eng ? 89 : V.oat) - V.coolant) * dt * (V.eng ? 0.02 : 0.002);
   V.transT += ((V.eng ? 82 : V.oat) - V.transT) * dt * 0.01;
-  if (V.eng) V.fuel = Math.max(0, V.fuel - dt * (0.0004 + thr * 0.003));
+  fuelStep(dt);
   V.cabin += ((V.fan > 0 && V.eng ? V.hvacT : V.oat + 4) - V.cabin) * dt * 0.01;
   V.battV += ((V.eng ? 14.3 : 12.4) - V.battV) * dt * 0.5; V.battI = V.eng ? 6 + thr * 10 : -3;
   if (V.puncture) V.tyres[0] = Math.max(80, V.tyres[0] - dt * 2);
@@ -775,11 +790,12 @@ const TXGEN = {
   0x100: () => ({ TqActual: V.eng ? VARIANTS[V.variant].tq * (V.thrEff ?? 0) : 0, TqMax: VARIANTS[V.variant].tq, TqMin: -60 }),
   0x110: () => ({ Selector: V.sel, GearActual: V.gear, GearTarget: V.gear, TcLockup: V.gear >= 3 && Math.abs(V.v) > 12, ShiftInProg: V.shiftT > 0, TransTemp: V.transT, TcmFault: 0 }),
   0x118: () => ({ TqReduceReq: V.shiftT > 0, TqLimit: 600, OutShaftRpm: (Math.abs(V.v) / TYRE_C) * 60 * VARIANTS[V.variant].fd }),
-  0x120: () => { const sp = rxv('PCM', 0x0A0); const mil = !sp.fresh && V.ign === 'RUN' && SIM.t > 3; return { Coolant: V.coolant, FuelLevel: V.fuel, Mil: mil, GlowPlug: 0, OilPressLow: !V.eng && V.ign === 'RUN', ChargeFault: !V.eng && V.ign === 'RUN', FuelCut: V.fuelCut, OutsideTemp: V.oat }; },
+  0x120: () => { const sp = rxv('PCM', 0x0A0); const mil = !sp.fresh && V.ign === 'RUN' && SIM.t > 3; const fs = pcmFuelSender(); return { SenderFault: fs.fault, SenderOhms: fs.ohms, Coolant: V.coolant, FuelLevel: fs.pct, Mil: mil, GlowPlug: 0, OilPressLow: !V.eng && V.ign === 'RUN', ChargeFault: !V.eng && V.ign === 'RUN', FuelCut: V.fuelCut, OutsideTemp: V.oat }; },
   0x130: () => tc4Logic(),
   0x0C8: () => ccmLogic(),
   0x0D0: () => { const sp = rxv('IPMA', 0x0A0); const kmh = sp.v ? sp.v.VehSpeed : 0; const on = sp.fresh && kmh > 65; const lka = !sp.fresh ? 'unavail' : on ? 'active' : 'standby'; return { LaneLeft: on, LaneRight: on, LkaState: lka, LdwAlert: on && Math.abs(V.laneOff) > 0.28, LatOffset: V.laneOff, LkaTorqueReq: on ? -V.laneOff * 4 : 0, AutoHighBeam: V.lux < 20 && V.lead === 0 }; },
-  0x3C0: () => { const st = NODE.IPC.st; return { Odometer: st.odo ?? V.odo, ChimeReq: 0, RangeKm: Math.round((V.fuel / 100) * 80 / 8.5 * 100) }; },
+  0x3C0: () => { const st = NODE.IPC.st; return { Odometer: st.odo ?? V.odo, ChimeReq: st.lowFuel && !st.lowChimed ? 1 : 0, LowFuel: !!st.lowFuel, FuelGaugeValid: !!st.fuelValid, RangeKm: st.dte ?? 0, FuelGauge: st.gauge ?? 0, AvgCons: st.avg ?? 0 }; },
+  0x128: () => ({ FuelRate: V.eng ? V.fuelRate : 0, FuelUsed: Math.floor(V.fuelUsedMl) % 65536, FuelTemp: V.fuelT }),
   0x400: () => ({ Screen: rxv('APIM', 0x110).v?.Selector === 'R' ? 'camera' : V.emerg !== 'idle' ? 'call' : 'on', EmergCall: V.emerg, PhoneLinked: 1, VolReq: 12 }),
   0x410: () => ({ Source: V.emerg !== 'idle' ? 'BT' : 'FM', Mute: V.emerg !== 'idle', Volume: 12 }),
   0x340: () => ({ IgnStatus: V.remote ? 'REMOTE' : V.crank > 0 ? 'START' : V.ign, RemoteStart: V.remote, RemoteMinLeft: V.remote ? Math.ceil((V.remoteUntil - SIM.t) / 60) : 0, WakeReason: V.wake }),
@@ -938,6 +954,7 @@ function monitors() {
   setDtc(NODE.ABS, 'C0035', !V.wss[0] && NODE.ABS.alive);
   setDtc(NODE.ABS, 'C0040', !V.wss[1] && NODE.ABS.alive);
   const sp = rxv('PCM', 0x0A0); if (NODE.PCM.alive && V.ign === 'RUN' && SIM.t > 3) setDtc(NODE.PCM, 'P0500', !sp.fresh);
+  if (NODE.PCM.alive && V.ign !== 'OFF') { setDtc(NODE.PCM, 'P0463', V.sender === 'open'); setDtc(NODE.PCM, 'P0462', V.sender === 'short'); }
   if (V.crash) { setDtc(NODE.RCM, 'B0001', true); setDtc(NODE.RCM, 'B1D00', true); }
   after(0.1, monitors);
 }
@@ -999,7 +1016,10 @@ function ecuService(n, q, functional) {
   const sid = q[0];
   if (sid === 0x01 && n.obd) {
     const pid = q[1]; const r = [0x41, pid];
-    if (pid === 0x00) { const sup = [0x04, 0x05, 0x0c, 0x0d, 0x11]; let m = 0; for (const p of sup) m |= 1 << (32 - p); m >>>= 0; return [...r, m >>> 24, (m >> 16) & 255, (m >> 8) & 255, m & 255]; }
+    const SUP = [0x04, 0x05, 0x0c, 0x0d, 0x11, 0x2f, 0x5e];
+    if (pid === 0x00 || pid === 0x20 || pid === 0x40) { let m = 0; for (let i = 1; i <= 32; i++) { const p = pid + i; if (SUP.includes(p) || (i === 32 && SUP.some((q) => q > p))) m |= 1 << (32 - i); } m >>>= 0; return [...r, m >>> 24, (m >> 16) & 255, (m >> 8) & 255, m & 255]; }
+    if (pid === 0x2f) { const fs = pcmFuelSender(); return [...r, Math.round(fs.pct * 2.55)]; }
+    if (pid === 0x5e) { const x = Math.round((V.eng ? V.fuelRate : 0) * 20); return [...r, x >> 8, x & 255]; }
     if (pid === 0x04) return [...r, Math.round((V.thrEff ?? 0) * 255)];
     if (pid === 0x05) return [...r, Math.round(V.coolant + 40)];
     if (pid === 0x0c) { const x = Math.round((V.eng ? V.rpm : 0) * 4); return [...r, x >> 8, x & 255]; }
@@ -1048,7 +1068,7 @@ function toolRx(c, f) {
 function decodeDiag(req, r, id) {
   const src = Object.values(NODE).find((n) => n.diag && n.diag + 8 === id)?.k ?? HEX(id, 3);
   if (r[0] === 0x7f) { const nrc = { 0x11: 'serviceNotSupported', 0x12: 'subFunctionNotSupported', 0x31: 'requestOutOfRange', 0x78: 'responsePending', 0x22: 'conditionsNotCorrect' }; return `${src}: negative response to 0x${HEX(r[1])}: NRC 0x${HEX(r[2])} ${nrc[r[2]] ?? ''}`; }
-  if (r[0] === 0x41) { const p = r[1]; if (p === 0x0c) return `${src}: engine RPM = ((A·256)+B)/4 = ${((r[2] * 256 + r[3]) / 4).toFixed(0)} rpm`; if (p === 0x0d) return `${src}: vehicle speed = A = ${r[2]} km/h`; if (p === 0x05) return `${src}: coolant = A − 40 = ${r[2] - 40} °C`; if (p === 0x00) { const m = ((r[2] << 24) | (r[3] << 16) | (r[4] << 8) | r[5]) >>> 0; const l = []; for (let i = 1; i <= 32; i++) if (m & (1 << (32 - i))) l.push(HEX(i)); return `${src}: PIDs 01-20 supported: ${l.join(' ')}`; } return `${src}: PID ${HEX(p)} = ${hexs(r.slice(2))}`; }
+  if (r[0] === 0x41) { const p = r[1]; if (p === 0x0c) return `${src}: engine RPM = ((A·256)+B)/4 = ${((r[2] * 256 + r[3]) / 4).toFixed(0)} rpm`; if (p === 0x0d) return `${src}: vehicle speed = A = ${r[2]} km/h`; if (p === 0x05) return `${src}: coolant = A − 40 = ${r[2] - 40} °C`; if (p === 0x2f) return `${src}: fuel tank level input = A·100/255 = ${(r[2] * 100 / 255).toFixed(1)} %`; if (p === 0x5e) return `${src}: engine fuel rate = ((A·256)+B)/20 = ${((r[2] * 256 + r[3]) / 20).toFixed(2)} L/h`; if (p === 0x00 || p === 0x20 || p === 0x40) { const m = ((r[2] << 24) | (r[3] << 16) | (r[4] << 8) | r[5]) >>> 0; const l = []; for (let i = 1; i <= 32; i++) if (m & (1 << (32 - i))) l.push(HEX(p + i)); return `${src}: PIDs ${HEX(p + 1)}-${HEX(p + 32)} supported: ${l.join(' ')}${l.includes(HEX(p + 32)) ? ` (${HEX(p + 32)} = next range has more: ask for 01 ${HEX(p + 32)})` : ''}`; } return `${src}: PID ${HEX(p)} = ${hexs(r.slice(2))}`; }
   if (r[0] === 0x43) { const n = r[1]; const l = []; for (let i = 0; i < n; i++) l.push(dtcFromBytes(r[2 + 2 * i], r[3 + 2 * i])); return `${src}: ${n} stored emission DTC(s) ${l.join(', ') || '(none)'}`; }
   if (r[0] === 0x49) return `${src}: VIN "${String.fromCharCode(...r.slice(3))}" (${r.length} bytes, multi-frame)`;
   if (r[0] === 0x62) return `${src}: DID ${HEX(r[1])}${HEX(r[2])} = "${String.fromCharCode(...r.slice(3))}"`;
@@ -1075,14 +1095,14 @@ function coreInit(seed = 20160401) {
   for (const k in BUS) delete BUS[k]; for (const k in NODE) delete NODE[k]; LOG.length = 0;
   resetTruth(); initTopology(); installBehaviours();
   for (const n of Object.values(NODE)) n.st.bootT = 0;
-  schedulePeriodic(); scheduleLin(); after(0.5, monitors);
+  schedulePeriodic(); scheduleLin(); after(0.5, monitors); const ft = () => { ipcFuel(); after(0.1, ft); }; after(0.1, ft);
   const tick = () => { step(0.005); after(0.005, tick); }; at(0, tick);
 }
 function busLoad(bus, win = 0.5) { const t1 = SIM.t, t0 = t1 - win; let s = 0; bus.busy = bus.busy.filter((x) => x[1] > t1 - 2); for (const [a, b] of bus.busy) s += Math.max(0, Math.min(b, t1) - Math.max(a, t0)); if (bus.cur && bus.cur.t0 < t1) s += t1 - Math.max(bus.cur.t0, t0); return clamp(s / win, 0, 1); }
 function repairAll() {
   for (const b of Object.values(BUS)) { b.f = { termA: true, termB: true, hgnd: false, hl: false, emiUntil: -1 }; }
   for (const n of Object.values(NODE)) { n.alive = true; n.babble = null; n.dtc.clear(); n.st.crash = false; for (const c of Object.values(n.ctrls)) { c.tec = 0; c.rec = 0; c.state = 'active'; c.q = c.q.filter((f) => !f.babble); } }
-  V.wss = [true, true, true, true]; V.crash = false; V.fuelCut = false; V.emerg = 'idle'; V.puncture = false; V.tyres = [240, 240, 240, 240];
+  V.wss = [true, true, true, true]; V.sender = 'ok'; V.crash = false; V.fuelCut = false; V.emerg = 'idle'; V.puncture = false; V.tyres = [240, 240, 240, 240];
   for (const b of Object.values(BUS)) kick(b);
   log({ kind: 'info', note: 'Repair: all faults removed, counters reset, DTCs cleared' });
 }
@@ -1110,6 +1130,69 @@ function remoteStart(cb) {
     log({ kind: 'info', note: 'BCM remote-start checks passed (locked, closed, TCM reports P) → PATS handshake with the PCM' });
     patsHandshake((ok) => { if (!ok) { if (cb) cb(false); return; } V.remote = true; V.remoteUntil = SIM.t + 600; setIgn('RUN'); V.crank = 0.9; V.fuelCut = false; log({ kind: 'info', note: 'Remote start: engine cranking; the climate control resumes its last setting. Runs for 10 min unless a key is used' }); if (cb) cb(true); });
   });
+}
+// ───────────── fuel level management (illustrative values) ─────────────
+// Truth: litres in an 80 L tank, burnt by a simple diesel fuel map, with a sloshing free surface.
+// Sender: float + resistor card in the tank, hard-wired to the PCM (illustrative: 160 Ω empty … 15 Ω full).
+// PCM: reads the resistance, checks the circuit range, broadcasts the RAW level (0x120) and the injected fuel (0x128).
+// IPC: damps the raw level (anti-slosh), fast-fills after a refuel, learns average consumption, computes range and low fuel.
+const SENDER = { empty: 160, full: 15, openAbove: 220, shortBelow: 5, tankH: (f) => Math.pow(clamp(f, 0, 1), 0.88) };
+function fuelStep(dt) {
+  const vt = VARIANTS[V.variant];
+  if (V.eng) { const pkw = Math.max(0, vt.tq * (V.thrEff ?? 0)) * V.rpm / 9549; V.fuelRate = 0.55 * V.rpm / 800 + pkw * 0.26; } else V.fuelRate = 0;
+  const used = V.fuelRate / 3600 * dt; // litres actually injected
+  V.fuelUsedMl += used * 1000;
+  V.fuelL = Math.max(0, V.fuelL - used * V.fuelMult); // ×N: demo shortcut, the tank drains faster than the injected quantity reported
+  if (V.fuelL <= 0 && V.eng) { V.eng = false; log({ kind: 'info', note: 'Out of fuel: the high-pressure pump runs dry and the engine stops' }); }
+  V.fuel = V.fuelL / V.tankL * 100;
+  // slosh: a lightly damped oscillator driven by longitudinal and lateral acceleration (fraction of tank height at the sender)
+  const w = 2 * Math.PI * 0.55, z = 0.07, target = -0.09 * V.lon + 0.07 * V.lat + (Math.abs(V.v) > 2 ? 0.004 * Math.sin(SIM.t * 7.3) : 0);
+  V.sloshV += (-w * w * (V.slosh - target) - 2 * z * w * V.sloshV) * dt; V.slosh += V.sloshV * dt; V.slosh = clamp(V.slosh, -0.18, 0.18);
+}
+function senderOhms() {
+  if (V.sender === 'open') return Infinity; if (V.sender === 'short') return 0.4;
+  const h = clamp(SENDER.tankH(V.fuelL / V.tankL) + V.slosh * Math.min(1, V.fuelL / 8), 0, 1);
+  return SENDER.empty - (SENDER.empty - SENDER.full) * h;
+}
+function pcmFuelSender() {
+  const R = senderOhms();
+  if (R > SENDER.openAbove) return { pct: 0, ohms: 255, fault: 'open' };
+  if (R < SENDER.shortBelow) return { pct: 0, ohms: 0, fault: 'short' };
+  const h = (SENDER.empty - R) / (SENDER.empty - SENDER.full); const f = Math.pow(clamp(h, 0, 1), 1 / 0.88);
+  return { pct: f * 100, ohms: Math.round(R), fault: 'ok' };
+}
+function ipcFuel() {
+  const n = NODE.IPC, st = n.st;
+  if (!n.alive || !awake(n)) { st.fuelInit = false; return; }
+  const e2 = rxv('IPC', 0x120), ff = rxv('IPC', 0x128), sp = rxv('IPC', 0x0A0);
+  const ok = e2.fresh && e2.v.SenderFault === 'ok'; st.fuelValid = ok;
+  if (ok) {
+    const raw = e2.v.FuelLevel;
+    if (!st.fuelInit) { st.gauge = raw; st.fuelInit = true; }
+    const still = sp.fresh && sp.v.VehSpeed < 2;
+    st.fillT = still && raw - st.gauge > 5 ? (st.fillT ?? 0) + 0.1 : 0;
+    const fast = st.fillT > 2; if (fast && !st.fastFill) log({ kind: 'info', note: `IPC: level ${raw.toFixed(0)} % well above the gauge (${st.gauge.toFixed(0)} %) for 2 s while stationary → refuel detected, fast-fill` });
+    st.fastFill = fast;
+    const tau = fast ? 1.5 : Math.max(1.5, 40 / V.fuelMult); /* burn ×N compresses the filter time too (demo time compression) */ st.gauge += (raw - st.gauge) * (0.1 / tau);
+  }
+  if (ff.fresh) { const u = ff.v.FuelUsed; if (st.lastUsed != null) { let d = u - st.lastUsed; if (d < 0) d += 65536; st.winMl = (st.winMl ?? 0) + d; } st.lastUsed = u; st.rate = ff.v.FuelRate; }
+  if (sp.fresh) st.winKm = (st.winKm ?? 0) + sp.v.VehSpeed / 3600 * 0.1;
+  if ((st.winKm ?? 0) > 0.4) { const inst = st.winMl / 1000 / st.winKm * 100; st.avg = st.avg == null ? inst : st.avg * 0.85 + inst * 0.15; st.winMl = 0; st.winKm = 0; }
+  if (st.avg == null) st.avg = 9.2; // learned value kept from the last trip
+  st.inst = sp.fresh && sp.v.VehSpeed > 3 && st.rate != null ? st.rate / sp.v.VehSpeed * 100 : null;
+  const litres = ok ? (st.gauge / 100) * 80 : null;
+  st.dte = ok ? Math.round(Math.max(0, litres - 4) / st.avg * 100) : null; // 4 L kept back as a hidden reserve
+  const low = ok && litres < 11;
+  if (low && !st.lowFuel) { log({ kind: 'info', note: `IPC: LOW FUEL warning: gauge ${litres.toFixed(1)} L, range ${st.dte} km. Amber lamp + chime request` }); st.lowChimed = false; }
+  if (low && st.lowFuel) st.lowChimed = true;
+  st.lowFuel = low;
+  if (!ok && st.fuelValid !== st.lastValid) log({ kind: 'info', note: `IPC: fuel level ${e2.fresh ? 'reported faulty by the PCM (' + e2.v.SenderFault + ')' : 'frame 0x120 missing'}: gauge shows "---", range unavailable` });
+  st.lastValid = st.fuelValid;
+}
+function refuel(litres) {
+  if (Math.abs(V.v) > 0.5) { log({ kind: 'info', note: 'Refuel refused: the truck is moving' }); return false; }
+  const add = Math.min(litres, V.tankL - V.fuelL); V.fuelL += add; V.fuel = V.fuelL / V.tankL * 100;
+  log({ kind: 'info', note: `Refuelled +${add.toFixed(1)} L → ${V.fuelL.toFixed(1)} L. The sender float rises at once; watch the cluster's fast-fill logic` }); return true;
 }
 // ===== CORE-END =====
 
@@ -1142,23 +1225,65 @@ const truck = new THREE.Group(); scene.add(truck);
 const skinMats = []; const edgeMat = new THREE.LineBasicMaterial({ color: 0x9bb4d4, transparent: true, opacity: 0.3 });
 function skinMat(color, op = 0.16) { const m = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: op, depthWrite: false, roughness: 0.6, metalness: 0.2, side: THREE.DoubleSide }); m.userData.op = op; skinMats.push(m); return m; }
 function addSkin(geo, mat, pos, rot) { const m = new THREE.Mesh(geo, mat); if (pos) m.position.set(...pos); if (rot) m.rotation.set(...rot); truck.add(m); const e = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 25), edgeMat); e.position.copy(m.position); e.rotation.copy(m.rotation); truck.add(e); return m; }
-const bodyMat = skinMat(0x8a5a2b, 0.17); // Wildtrak "Pride Orange"-ish, x-rayed
-{ // cab + bonnet: extruded side profile
-  const pr = [[2.64, 0.5], [2.7, 0.8], [2.62, 1.04], [2.32, 1.13], [1.36, 1.2], [0.66, 1.77], [-0.52, 1.82], [-0.76, 1.78], [-0.8, 0.5]];
-  const sh = new THREE.Shape(); sh.moveTo(pr[0][0], pr[0][1]); for (const p of pr.slice(1)) sh.lineTo(p[0], p[1]); sh.closePath();
-  const g = new THREE.ExtrudeGeometry(sh, { depth: 1.8, bevelEnabled: false }); g.translate(0, 0, -0.9); addSkin(g, bodyMat);
-  const glass = new THREE.MeshStandardMaterial({ color: 0x9fd8ff, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide }); skinMats.push(glass); glass.userData.op = 0.12;
-  const ws = new THREE.Mesh(new THREE.PlaneGeometry(1.56, 0.92), glass); ws.position.set(1.0, 1.49, 0); ws.rotation.set(0, Math.PI / 2, 0); ws.rotateX(-Math.atan2(0.71, 0.57)); truck.add(ws);
-  // tray (tub) with tailgate and the Wildtrak sports bar
-  addSkin(new THREE.BoxGeometry(1.96, 0.04, 1.74), bodyMat, [-1.82, 0.66, 0]);
-  addSkin(new THREE.BoxGeometry(1.96, 0.5, 0.05), bodyMat, [-1.82, 0.91, 0.88]);
-  addSkin(new THREE.BoxGeometry(1.96, 0.5, 0.05), bodyMat, [-1.82, 0.91, -0.88]);
-  addSkin(new THREE.BoxGeometry(0.05, 0.5, 1.8), bodyMat, [-2.8, 0.91, 0]);
-  const bar = new THREE.CatmullRomCurve3([V3([-1.05, 1.16, -0.86]), V3([-1.05, 1.5, -0.78]), V3([-1.05, 1.56, 0]), V3([-1.05, 1.5, 0.78]), V3([-1.05, 1.16, 0.86])]);
-  truck.add(new THREE.Mesh(new THREE.TubeGeometry(bar, 30, 0.035, 8), new THREE.MeshStandardMaterial({ color: 0x9aa5b4, metalness: 0.7, roughness: 0.3 })));
-}
 const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 0.8, metalness: 0.3 });
 const mechMat = new THREE.MeshStandardMaterial({ color: 0x3a4456, roughness: 0.7, metalness: 0.4, transparent: true, opacity: 0.55 });
+// Proportions after the public PX3 Wildtrak figures: length 5.36 m, body width ~1.85 m, height 1.82 m (roof rails),
+// wheelbase 3.22 m, track 1.56 m, 265/60R18 tyres. Shapes are stylised, not CAD.
+const bodyMat = skinMat(0xc2581c, 0.2); // Wildtrak orange, x-rayed
+const trimMat = skinMat(0x1d222c, 0.55); // black / dark-grey plastics: flares, bumpers, grille, mirrors, steps
+const glassMat = skinMat(0x7fb6d9, 0.13);
+const chromeMat = new THREE.MeshStandardMaterial({ color: 0x9aa5b4, metalness: 0.75, roughness: 0.3 });
+const BW = 1.8; // body width at the shoulder (bevel adds the rest)
+// shape from commands: ['m',x,y] ['l',x,y] ['q',cx,cy,x,y] ['a',cx,cy,r,a0,a1,cw]
+function shapeOf(cmds) { const s = new THREE.Shape(); for (const c of cmds) { if (c[0] === 'm') s.moveTo(c[1], c[2]); else if (c[0] === 'l') s.lineTo(c[1], c[2]); else if (c[0] === 'q') s.quadraticCurveTo(c[1], c[2], c[3], c[4]); else s.absarc(c[1], c[2], c[3], c[4], c[5], c[6]); } s.closePath(); return s; }
+function slab(cmds, depth, mat, z = 0, bevel = 0.035) { const g = new THREE.ExtrudeGeometry(shapeOf(cmds), { depth, bevelEnabled: bevel > 0, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 2, curveSegments: 18 }); g.translate(0, 0, -depth / 2 + z); return addSkin(g, mat); }
+function strut(a, b, r, mat) { const A = V3(a), B = V3(b); const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, A.distanceTo(B), 8), mat); m.position.copy(A).lerp(B, 0.5); m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), B.clone().sub(A).normalize()); truck.add(m); return m; }
+const box = (sx, sy, sz, mat, x, y, z) => addSkin(new THREE.BoxGeometry(sx, sy, sz), mat, [x, y, z]);
+{
+  // lower cab + bonnet: beltline, cowl, bonnet, nose, bumper line and the front wheel arch
+  slab([['m', -0.8, 0.5], ['l', -0.8, 1.19], ['l', 1.3, 1.2], ['q', 1.9, 1.19, 2.42, 1.12], ['q', 2.6, 1.09, 2.63, 0.98], ['l', 2.66, 0.66], ['q', 2.66, 0.47, 2.52, 0.45],
+        ['l', 2.13, 0.45], ['a', 1.61, 0.39, 0.52, 0.12, Math.PI - 0.12, false], ['l', 1.0, 0.5]], BW - 0.07, bodyMat, 0, 0.035);
+  // glasshouse: narrower than the body (tumblehome), raked windscreen, near-vertical rear screen
+  slab([['m', -0.79, 1.2], ['l', -0.75, 1.72], ['q', -0.72, 1.8, -0.6, 1.8], ['l', 0.46, 1.8], ['q', 0.6, 1.8, 0.67, 1.74], ['l', 1.33, 1.21]], 1.46, glassMat, 0, 0.04);
+  box(1.18, 0.03, 1.5, bodyMat, -0.07, 1.82, 0); // roof skin
+  for (const s of [-1, 1]) {
+    strut([1.33, 1.21, s * 0.76], [0.66, 1.76, s * 0.74], 0.022, bodyMat); // A-pillar
+    box(0.08, 0.6, 0.04, bodyMat, 0.17, 1.5, s * 0.775); // B-pillar
+    box(0.14, 0.58, 0.04, bodyMat, -0.74, 1.49, s * 0.775); // C-pillar
+    box(1.08, 0.025, 0.035, trimMat, -0.07, 1.87, s * 0.6); // roof rails
+    for (const x of [-0.55, 0.42]) box(0.04, 0.05, 0.035, trimMat, x, 1.845, s * 0.6);
+    // door shut lines and handles
+    const zf = s * (BW / 2 + 0.006);
+    const lines = new THREE.BufferGeometry().setFromPoints([V3([1.16, 0.52, zf]), V3([1.22, 1.2, zf]), V3([0.2, 0.5, zf]), V3([0.2, 1.2, zf]), V3([-0.74, 0.5, zf]), V3([-0.74, 1.19, zf])]);
+    truck.add(new THREE.LineSegments(lines, new THREE.LineBasicMaterial({ color: 0x1a1d24, transparent: true, opacity: 0.8 })));
+    for (const x of [0.3, -0.62]) box(0.12, 0.025, 0.02, trimMat, x, 1.08, s * (BW / 2 + 0.02));
+    // mirrors on stalks, side steps, wheel-arch flares
+    box(0.1, 0.15, 0.17, trimMat, 1.17, 1.31, s * 0.99); strut([1.24, 1.24, s * 0.88], [1.19, 1.28, s * 0.93], 0.018, trimMat);
+    box(1.9, 0.04, 0.16, trimMat, 0.2, 0.43, s * 0.99);
+    for (const x of [1.61, -1.61]) { const fl = new THREE.Mesh(new THREE.TorusGeometry(0.535, 0.045, 6, 26, Math.PI), trimMat); fl.position.set(x, 0.39, s * (BW / 2 + 0.03)); fl.scale.z = 1.6; truck.add(fl); }
+    // tub sides with the rear wheel arch, and bed-rail caps
+    slab([['m', -0.86, 0.52], ['l', -0.86, 1.18], ['l', -2.86, 1.18], ['l', -2.88, 0.56], ['l', -2.13, 0.5], ['a', -1.61, 0.39, 0.52, Math.PI - 0.12, 0.12, true], ['l', -0.86, 0.5]], 0.04, bodyMat, s * (BW / 2 - 0.02), 0.02);
+    box(1.98, 0.03, 0.08, trimMat, -1.86, 1.2, s * (BW / 2 - 0.03));
+    // fog lamp
+    const fog = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.03, 16), chromeMat); fog.rotation.z = Math.PI / 2; fog.position.set(2.69, 0.57, s * 0.62); truck.add(fog);
+  }
+  box(0.05, 0.6, BW - 0.1, bodyMat, -0.88, 0.88, 0); // tub front wall
+  box(1.96, 0.03, BW - 0.12, bodyMat, -1.86, 0.8, 0); // bed floor (load height ≈ 0.8 m)
+  box(0.05, 0.6, BW - 0.06, bodyMat, -2.88, 0.88, 0); // tailgate
+  box(0.02, 0.05, 0.22, trimMat, -2.91, 1.08, 0); // tailgate handle
+  box(0.18, 0.12, BW - 0.1, chromeMat, -2.95, 0.55, 0); // step bumper
+  box(0.2, 0.06, 0.07, darkMat, -3.08, 0.5, 0); // tow-bar tongue
+  box(0.14, 0.16, BW - 0.06, trimMat, 2.66, 0.52, 0); // lower front bumper
+  box(0.5, 0.03, 1.0, chromeMat, 2.38, 0.42, 0); // bash plate
+  box(0.03, 0.27, 1.0, trimMat, 2.68, 0.84, 0); // grille
+  for (const y of [0.8, 0.9]) box(0.02, 0.035, 0.98, chromeMat, 2.7, y, 0); // grille bars
+  // Wildtrak sports bar over the front of the tub
+  const bar = new THREE.CatmullRomCurve3([V3([-1.02, 1.2, -0.86]), V3([-1.02, 1.5, -0.8]), V3([-1.04, 1.57, 0]), V3([-1.02, 1.5, 0.8]), V3([-1.02, 1.2, 0.86])]);
+  truck.add(new THREE.Mesh(new THREE.TubeGeometry(bar, 30, 0.035, 8), chromeMat));
+  strut([-1.02, 1.45, -0.78], [-1.55, 1.2, -0.84], 0.025, chromeMat); strut([-1.02, 1.45, 0.78], [-1.55, 1.2, 0.84], 0.025, chromeMat);
+  // fuel filler flap: left rear quarter, behind the cab
+  const flap = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.012, 20), trimMat); flap.rotation.x = Math.PI / 2; flap.position.set(-1.12, 1.0, -(BW / 2 + 0.02)); truck.add(flap);
+}
 for (const z of [-0.46, 0.46]) { const r = new THREE.Mesh(new THREE.BoxGeometry(5.0, 0.12, 0.07), darkMat); r.position.set(-0.1, 0.5, z); truck.add(r); }
 const engine = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.46, 0.58), mechMat); engine.position.set(1.98, 0.74, 0); truck.add(engine);
 const trans = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 0.95, 14), mechMat); trans.rotation.z = Math.PI / 2; trans.position.set(1.18, 0.5, 0); truck.add(trans);
@@ -1166,13 +1291,27 @@ const tcase = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.24, 0.26), mechMat); 
 const shaftR = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 2.0, 8), mechMat); shaftR.rotation.z = Math.PI / 2; shaftR.position.set(-0.56, 0.42, 0); truck.add(shaftR);
 const shaftF = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.1, 8), mechMat); shaftF.rotation.z = Math.PI / 2; shaftF.position.set(1.06, 0.38, -0.12); truck.add(shaftF);
 for (const x of [-1.61, 1.61]) { const ax = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.56, 8), mechMat); ax.rotation.x = Math.PI / 2; ax.position.set(x, 0.39, 0); truck.add(ax); const diff = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 8), mechMat); diff.position.set(x, 0.39, 0); truck.add(diff); }
-const fuelTank = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.28, 0.55), mechMat); fuelTank.position.set(-0.9, 0.42, -0.5); truck.add(fuelTank);
+// fuel tank (80 L) between the frame rails, with the fuel inside, the sender float, and the filler neck
+const TANK = { x: -0.95, y: 0.42, z: -0.22, l: 0.82, h: 0.26, w: 0.36 };
+const fuelTank = new THREE.Mesh(new THREE.BoxGeometry(TANK.l, TANK.h, TANK.w), new THREE.MeshStandardMaterial({ color: 0x64748b, transparent: true, opacity: 0.28, depthWrite: false })); fuelTank.position.set(TANK.x, TANK.y, TANK.z); truck.add(fuelTank);
+{ const te = new THREE.LineSegments(new THREE.EdgesGeometry(fuelTank.geometry), new THREE.LineBasicMaterial({ color: 0xcbd5e1, transparent: true, opacity: 0.6 })); te.position.copy(fuelTank.position); truck.add(te); }
+const fuelLiquid = new THREE.Mesh(new THREE.BoxGeometry(TANK.l - 0.02, 1, TANK.w - 0.02), new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0x7a3d00, emissiveIntensity: 0.6, transparent: true, opacity: 0.75, depthWrite: false })); truck.add(fuelLiquid);
+const senderFloat = new THREE.Mesh(new THREE.SphereGeometry(0.03, 12, 8), new THREE.MeshStandardMaterial({ color: 0xf8fafc, emissive: 0x94a3b8, emissiveIntensity: 0.4 })); truck.add(senderFloat);
+strut([TANK.x + 0.2, TANK.y + TANK.h / 2, TANK.z], [TANK.x + 0.2, TANK.y - TANK.h / 2 + 0.02, TANK.z], 0.006, chromeMat); // sender arm / card
+const fillerNeck = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([V3([TANK.x - 0.25, TANK.y + 0.12, TANK.z - 0.12]), V3([-1.12, 0.7, -0.75]), V3([-1.12, 0.98, -0.88])]), 20, 0.025, 8), darkMat); truck.add(fillerNeck);
+const senderWire = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V3([TANK.x + 0.2, TANK.y + TANK.h / 2, TANK.z]), V3([-0.4, 0.6, -0.55]), V3([1.0, 0.62, -0.62]), V3(NODE.PCM.pos)]), new THREE.LineBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.7 })); truck.add(senderWire);
 const battery = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.2, 0.18), new THREE.MeshStandardMaterial({ color: 0x1f2937 })); battery.position.set(2.05, 0.86, -0.66); truck.add(battery);
 const wheels = [];
+const tyreMat = new THREE.MeshStandardMaterial({ color: 0x15181e, roughness: 0.95 });
+const rimMat = new THREE.MeshStandardMaterial({ color: 0x3b4250, metalness: 0.7, roughness: 0.35 });
 for (const [x, z] of [[1.61, 0.79], [1.61, -0.79], [-1.61, 0.79], [-1.61, -0.79]]) {
-  const w = new THREE.Group(); w.position.set(x, 0.39, z);
-  const tyre = new THREE.Mesh(new THREE.CylinderGeometry(0.39, 0.39, 0.27, 28), new THREE.MeshStandardMaterial({ color: 0x15181e, roughness: 0.95 })); tyre.rotation.x = Math.PI / 2; w.add(tyre);
-  const rimM = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.28, 6), new THREE.MeshStandardMaterial({ color: 0x6b7380, metalness: 0.8, roughness: 0.3 })); rimM.rotation.x = Math.PI / 2; w.add(rimM);
+  const w = new THREE.Group(); w.position.set(x, 0.39, z); const spin = new THREE.Group(); w.add(spin); w.userData.spin = spin;
+  const tyre = new THREE.Mesh(new THREE.TorusGeometry(0.308, 0.082, 14, 40), tyreMat); tyre.scale.z = 1.62; spin.add(tyre); // 265/60R18, rounded shoulders
+  const tread = new THREE.Mesh(new THREE.CylinderGeometry(0.386, 0.386, 0.2, 40, 1, true), new THREE.MeshStandardMaterial({ color: 0x0f1115, roughness: 1, wireframe: false })); tread.rotation.x = Math.PI / 2; spin.add(tread); // tread band
+  const sgn = Math.sign(z);
+  const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.232, 0.232, 0.2, 28, 1, true), rimMat); rim.rotation.x = Math.PI / 2; spin.add(rim);
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.04, 16), chromeMat); hub.rotation.x = Math.PI / 2; hub.position.z = sgn * 0.09; spin.add(hub);
+  for (let i = 0; i < 6; i++) { const sp = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.045, 0.025), rimMat); const a = (i / 6) * Math.PI * 2; sp.position.set(Math.cos(a) * 0.14, Math.sin(a) * 0.14, sgn * 0.085); sp.rotation.z = a; spin.add(sp); }
   truck.add(w); wheels.push(w);
 }
 const steerG = new THREE.Group(); steerG.position.set(0.86, 1.2, 0.42); steerG.rotation.y = Math.PI / 2; steerG.rotateX(-0.35); truck.add(steerG);
@@ -1180,14 +1319,14 @@ const steerWheel = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.022, 8, 28), n
 // lamps driven by the BCM / TRM outputs
 const lampMat = (c) => new THREE.MeshStandardMaterial({ color: 0x222222, emissive: c, emissiveIntensity: 0 });
 const lamps = {};
-lamps.headL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12, 0.34), lampMat(0xfff4d6)); lamps.headL.position.set(2.66, 0.95, -0.62);
-lamps.headR = lamps.headL.clone(); lamps.headR.material = lamps.headL.material; lamps.headR.position.z = 0.62;
-lamps.turnFL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.1), lampMat(0xffa500)); lamps.turnFL.position.set(2.66, 0.85, -0.83);
-lamps.turnFR = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.1), lampMat(0xffa500)); lamps.turnFR.position.set(2.66, 0.85, 0.83);
-lamps.tailL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.1), lampMat(0xff2020)); lamps.tailL.position.set(-2.83, 0.95, -0.82);
-lamps.tailR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.1), lampMat(0xff2020)); lamps.tailR.position.set(-2.83, 0.95, 0.82);
-lamps.revL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 0.1), lampMat(0xffffff)); lamps.revL.position.set(-2.83, 0.76, -0.82);
-lamps.revR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 0.1), lampMat(0xffffff)); lamps.revR.position.set(-2.83, 0.76, 0.82);
+lamps.headL = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.34), lampMat(0xfff4d6)); lamps.headL.position.set(2.64, 0.96, -0.64); lamps.headL.rotation.y = -0.25;
+lamps.headR = lamps.headL.clone(); lamps.headR.material = lamps.headL.material; lamps.headR.position.z = 0.64; lamps.headR.rotation.y = 0.25;
+lamps.turnFL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.1), lampMat(0xffa500)); lamps.turnFL.position.set(2.58, 0.98, -0.85);
+lamps.turnFR = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.1), lampMat(0xffa500)); lamps.turnFR.position.set(2.58, 0.98, 0.85);
+lamps.tailL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.1), lampMat(0xff2020)); lamps.tailL.position.set(-2.9, 0.95, -0.82);
+lamps.tailR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.1), lampMat(0xff2020)); lamps.tailR.position.set(-2.9, 0.95, 0.84);
+lamps.revL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 0.1), lampMat(0xffffff)); lamps.revL.position.set(-2.9, 0.76, -0.82);
+lamps.revR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 0.1), lampMat(0xffffff)); lamps.revR.position.set(-2.9, 0.76, 0.82);
 for (const m of Object.values(lamps)) truck.add(m);
 const trailer = new THREE.Group(); { const tb = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.7, 1.6), skinMat(0x64748b, 0.18)); tb.position.set(-4.9, 0.85, 0); trailer.add(tb); const dr = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.06, 0.06), darkMat); dr.position.set(-3.35, 0.5, 0); trailer.add(dr); for (const z of [-0.85, 0.85]) { const w = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.18, 20), new THREE.MeshStandardMaterial({ color: 0x15181e })); w.rotation.x = Math.PI / 2; w.position.set(-4.9, 0.3, z); trailer.add(w); } trailer.visible = false; truck.add(trailer); }
 const bags = []; for (const p of [[0.82, 1.2, 0.42], [1.05, 1.15, -0.42]]) { const b = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 12), new THREE.MeshStandardMaterial({ color: 0xf8fafc, transparent: true, opacity: 0.85 })); b.position.set(...p); b.scale.setScalar(0.01); b.visible = false; truck.add(b); bags.push(b); }
@@ -1214,6 +1353,7 @@ for (const [lk, L] of Object.entries(LINDEF)) for (const [sk, s] of Object.entri
 const rfMesh = {};
 ['FL', 'FR', 'RL', 'RR'].forEach((k, i) => { const w = wheels[[1, 0, 3, 2][i]]; const m = new THREE.Mesh(new THREE.SphereGeometry(0.035, 10, 8), new THREE.MeshStandardMaterial({ color: 0xcbd5e1, emissive: 0xcbd5e1, emissiveIntensity: 0.2 })); m.position.set(w.position.x, 0.62, w.position.z * 1.0); truck.add(m); rfMesh['tpms' + k] = m; });
 const fobMesh = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.03, 0.18), new THREE.MeshStandardMaterial({ color: 0x111827, emissive: 0x334155, emissiveIntensity: 0.5 })); fobMesh.position.set(0.4, 1.0, 1.75); truck.add(fobMesh);
+{ const el = document.createElement('div'); el.className = 'lbl lin'; el.style.color = '#fde68a'; el.innerHTML = '<b>fuel sender</b>'; el.title = 'In-tank fuel level sender (float + resistor card), hard-wired to the PCM'; el.onclick = () => { showPane('cluster'); $('fuelCard').scrollIntoView({ block: 'start' }); }; labelsEl.appendChild(el); labelEls.fuel = el; }
 { const el = document.createElement('div'); el.className = 'lbl lin'; el.style.color = '#e2e8f0'; el.innerHTML = '<b>key fob</b>'; el.title = 'Remote keyless entry fob: 315/433 MHz RF to the BCM receiver'; el.onclick = () => fob('unlock'); labelsEl.appendChild(el); labelEls.fob = el; }
 
 // ───────────────────────── wiring: trunks, stubs, terminators ─────────────────────────
@@ -1351,7 +1491,7 @@ function updateLabels() {
     const dtcN = [...n.dtc.values()].filter((e) => e.status & 1).length; el.title = `${n.name}${dtcN ? ` · ${dtcN} active DTC(s)` : ''}`;
   }
   for (const [sk, m] of Object.entries(linMesh)) place(labelEls['lin:' + sk], m.position);
-  place(labelEls.fob, fobMesh.position);
+  place(labelEls.fob, fobMesh.position); place(labelEls.fuel, new THREE.Vector3(TANK.x + 0.2, TANK.y + 0.12, TANK.z));
   // declutter: nearer labels keep their spot, others step upward until they no longer overlap (leader offset only, no layout change)
   if ((UI.lblTick = (UI.lblTick ?? 0) + 1) % 30 === 1) for (const p of placed) p.el._w = p.el.offsetWidth || 50;
   placed.sort((a, b) => a.z - b.z); const rects = [];
@@ -1370,7 +1510,11 @@ function updateTruckVisuals(wdt) {
   lamps.tailL.material.emissiveIntensity = bcmOn ? (L.BrakeLamp ? 3 : hl !== 'off' ? 0.8 : 0) + (L.TurnL ? 1 : 0) : 0; lamps.tailR.material.emissiveIntensity = bcmOn ? (L.BrakeLamp ? 3 : hl !== 'off' ? 0.8 : 0) + (L.TurnR ? 1 : 0) : 0;
   lamps.revL.material.emissiveIntensity = lamps.revR.material.emissiveIntensity = bcmOn && L.ReverseLamp ? 2.5 : 0;
   trailer.visible = V.trailer;
-  const rot = (V.v / 0.39) * wdt / Math.max(1, UI.stretch); for (const w of wheels) w.children.forEach((c) => (c.rotation.y += rot));
+  const rot = (V.v / 0.39) * wdt / Math.max(1, UI.stretch); for (const w of wheels) w.userData.spin.rotation.z -= rot;
+  const lvl = clamp(V.fuelL / V.tankL, 0, 1); const hh = Math.max(0.004, (TANK.h - 0.02) * Math.pow(lvl, 0.88));
+  fuelLiquid.scale.y = hh; fuelLiquid.position.set(TANK.x, TANK.y - TANK.h / 2 + 0.01 + hh / 2, TANK.z); fuelLiquid.rotation.z = clamp(V.slosh * 1.4, -0.3, 0.3); fuelLiquid.visible = lvl > 0.002;
+  senderFloat.position.set(TANK.x + 0.2, TANK.y - TANK.h / 2 + 0.01 + clamp(hh + V.slosh * 0.25, 0.01, TANK.h - 0.03), TANK.z);
+  senderWire.material.color.set(V.sender === 'ok' ? 0x94a3b8 : 0xff3030); senderWire.material.opacity = V.sender === 'ok' ? 0.6 : 1;
   wheels[0].rotation.y = wheels[1].rotation.y = -(V.steer / 16.5) * Math.PI / 180;
   steerWheel.rotation.z = (V.steer * Math.PI) / 180 * -1;
   grid.position.x = -((V.odo * 1000) % 0.5);
@@ -1481,6 +1625,8 @@ function sensorEvent(k) {
   if (k === 'crash') { if (V.v < 5) { V.sel = 'D'; V.v = 50 / 3.6; } triggerCrash(); }
   if (k === 'gw') nodeFault('GWM', 'dead');
   if (k === 'tyre') { V.puncture = true; log({ kind: 'info', note: 'LF tyre slow puncture: the RF sensor in the wheel reports the falling pressure to the BCM once a second' }); }
+  if (k === 'fuelOpen') setSender('open');
+  if (k === 'refuel') refuel(80);
   if (k === 'repair') { repairAll(); V.v = 0; V.sel = 'P'; V.thr = 0; V.brk = 0; V.autoSpd = 0; if (!V.eng) { setIgn('RUN'); crankEngine(); } syncControls(); }
 }
 document.querySelectorAll('[data-bf]').forEach((b) => (b.onclick = () => busFault($('fBus').value, b.dataset.bf)));
@@ -1571,9 +1717,10 @@ function drawCluster() {
   tt.push(['MIL', e2.v?.Mil && e2.fresh, '#f59e0b']); tt.push(['BATT', e2.v?.ChargeFault && e2.fresh, '#ef4444']);
   tt.push(['TPMS', !tp.fresh || (tp.v && tp.v.LowFlags), '#f59e0b']); tt.push(['DOOR', dr.v && (dr.v.DoorFL || dr.v.DoorFR || dr.v.DoorRL || dr.v.DoorRR || dr.v.Tailgate || dr.v.Bonnet), '#ef4444']);
   tt.push(['HIGH', li.v?.Headlamp === 'high' && li.fresh, '#3b82f6']); tt.push(['LIGHTS', ['low', 'park'].includes(li.v?.Headlamp) && li.fresh, '#22c55e']);
+  const fst = ipc.st; tt.push(['FUEL', fst.lowFuel || (!fst.fuelValid && Math.floor(UI.wall * 2) % 2 === 0), '#f59e0b']);
   tt.push(['4×4', t4.v && t4.v.Mode4x4 !== '2H' && t4.fresh, '#22c55e']); tt.push(['LOCK', t4.v?.LockerActive && t4.fresh, '#f59e0b']); tt.push(['TRL', trl.v?.TrlConnected && trl.fresh, '#22c55e']);
   cx.textAlign = 'center'; cx.textBaseline = 'middle'; cx.font = '700 17px system-ui';
-  tt.forEach(([t, lit, c], i) => { const x = 37 + i * 67, y = 26; cx.fillStyle = lit ? c : '#111827'; cx.strokeStyle = lit ? c : '#1f2937'; cx.lineWidth = 1; cx.fillRect(x - 32, y - 14, 64, 28); cx.fillStyle = lit ? '#0b0f17' : '#334155'; cx.fillText(t, x, y); });
+  tt.forEach(([t, lit, c], i) => { const x = 33 + i * 62.5, y = 26; cx.fillStyle = lit ? c : '#111827'; cx.strokeStyle = lit ? c : '#1f2937'; cx.lineWidth = 1; cx.fillRect(x - 30, y - 14, 60, 28); cx.fillStyle = lit ? '#0b0f17' : '#334155'; cx.fillText(t, x, y); });
   // turn arrows
   const arrow = (x, dir, lit) => { cx.fillStyle = lit ? '#22c55e' : '#14261a'; cx.beginPath(); cx.moveTo(x, 70); cx.lineTo(x + 18 * dir, 58); cx.lineTo(x + 18 * dir, 82); cx.closePath(); cx.fill(); };
   arrow(380, -1, li.fresh && li.v?.TurnL); arrow(500, 1, li.fresh && li.v?.TurnR);
@@ -1589,14 +1736,14 @@ function drawCluster() {
   line(258, lka.v ? `LKA ${lka.v.LkaState}${lka.v.LdwAlert ? ' · LANE!' : ''}` : (V.variant === 'px2' ? '' : 'LKA ---'), lka.fresh ? '#94a3b8' : '#475569', '18px system-ui');
   if (pam.fresh && pam.v.PamActive) { const zs = [pam.v.ZoneOL, pam.v.ZoneIL, pam.v.ZoneIR, pam.v.ZoneOR]; zs.forEach((z, i) => { const n = z > 150 ? 0 : z > 100 ? 1 : z > 60 ? 2 : z > 35 ? 3 : 4; for (let k = 0; k < 4; k++) { cx.fillStyle = k < n ? (k >= 3 ? '#ef4444' : k >= 2 ? '#f59e0b' : '#22c55e') : '#1f2937'; cx.fillRect(372 + i * 25, 330 - k * 9, 20, 6); } }); line(345, `rear ${Math.min(...zs)} cm`, '#e2e8f0', '17px ui-monospace,monospace'); }
   else line(300, hv.v ? `${hv.v.SetTemp.toFixed(1)} °C · fan ${hv.v.Fan}` : 'climate ---', hv.fresh ? '#cbd5e1' : '#475569', '20px system-ui');
-  line(322, e2.v ? `outside ${e2.v.OutsideTemp.toFixed(1)} °C` : '', e2.fresh ? '#94a3b8' : '#475569', '17px system-ui');
+  line(322, e2.v ? `${e2.v.OutsideTemp.toFixed(0)} °C · ${fst.avg != null ? fst.avg.toFixed(1) + ' L/100 km' : ''}` : '', e2.fresh ? '#94a3b8' : '#475569', '17px system-ui');
   line(372, `ODO ${(ipc.st.odo ?? V.odo).toFixed(1)} km`, '#94a3b8', '18px ui-monospace,monospace');
   line(390, tp.v ? `TPMS ${['TyreFL', 'TyreFR', 'TyreRL', 'TyreRR'].map((k) => Math.round(tp.v[k])).join(' ')} kPa` : 'TPMS ---', tp.fresh ? (tp.v.LowFlags ? '#f59e0b' : '#64748b') : '#475569', '15px ui-monospace,monospace');
   if (ap.fresh && ap.v.EmergCall !== 'idle') { cx.fillStyle = '#7f1d1d'; cx.fillRect(335, 104, 210, 26); line(118, `SYNC: Emergency call ${ap.v.EmergCall}`, '#fff', '700 17px system-ui'); }
   if (rcm.fresh && rcm.v.CrashDetected) { cx.fillStyle = 'rgba(127,29,29,.85)'; cx.fillRect(20, 420, 840, 36); cx.fillStyle = '#fff'; cx.font = '700 22px system-ui'; cx.fillText('CRASH DETECTED: airbags deployed · fuel cut · doors unlocked', 440, 438); }
   // bars: coolant & fuel
   const bar = (x, label, v, max, fresh, warn) => { cx.fillStyle = '#1f2937'; cx.fillRect(x, 430, 120, 10); if (v != null) { cx.fillStyle = !fresh ? '#475569' : warn ? '#ef4444' : '#e2e8f0'; cx.fillRect(x, 430, 120 * clamp(v / max, 0, 1), 10); } cx.fillStyle = '#64748b'; cx.font = '15px system-ui'; cx.textAlign = 'left'; cx.fillText(label + (fresh ? '' : ' (stale)'), x, 452); cx.textAlign = 'center'; };
-  if (!(rcm.fresh && rcm.v.CrashDetected)) { bar(80, `coolant ${e2.v ? e2.v.Coolant.toFixed(0) + ' °C' : '---'}`, e2.v ? e2.v.Coolant - 40 : null, 80, e2.fresh, e2.v && e2.v.Coolant > 110); bar(680, `fuel ${e2.v ? e2.v.FuelLevel.toFixed(0) + ' %' : '---'}`, e2.v ? e2.v.FuelLevel : null, 100, e2.fresh, e2.v && e2.v.FuelLevel < 12); }
+  if (!(rcm.fresh && rcm.v.CrashDetected)) { bar(80, `coolant ${e2.v ? e2.v.Coolant.toFixed(0) + ' °C' : '---'}`, e2.v ? e2.v.Coolant - 40 : null, 80, e2.fresh, e2.v && e2.v.Coolant > 110); bar(680, `fuel ${fst.fuelValid ? fst.gauge.toFixed(0) + ' % · ' + fst.dte + ' km' : '---'}`, fst.fuelValid ? fst.gauge : null, 100, fst.fuelValid, fst.lowFuel); }
   if (pw.fresh && pw.v.IgnStatus === 'REMOTE') { cx.fillStyle = '#38bdf8'; cx.font = '700 18px system-ui'; cx.fillText(`REMOTE START · ${pw.v.RemoteMinLeft} min`, 440, 92); }
   if (V.ign === 'OFF' && !V.remote) { cx.fillStyle = 'rgba(5,7,11,.6)'; cx.fillRect(0, 0, W, H); cx.fillStyle = '#94a3b8'; cx.font = '600 28px system-ui'; cx.fillText(`Welcome mode (woken by ${V.wake})`, 440, 235); }
 }
@@ -1611,6 +1758,40 @@ function renderAges() {
   $('ageList').innerHTML = h + '</table><div class="note">Limit = 3 × period. Park-aid frames (0x3A0) are expected only in reverse. Click a row to animate only that ID.</div>';
   $('ageSum').textContent = stale ? `${stale} stale` : 'all fresh';
   $('ageList').querySelectorAll('tr[data-id]').forEach((r) => (r.onclick = () => { UI.focusId = Number(r.dataset.id); renderLegend(); }));
+}
+
+// ───────────────────────── fuel card ─────────────────────────
+const FH = []; let fhLast = -1;
+function setSender(m) { V.sender = m; log({ kind: 'info', note: m === 'ok' ? 'Fuel sender circuit repaired' : `Fuel sender ${m === 'open' ? 'open circuit (corroded connector on the tank)' : 'shorted to ground'}: the PCM now reads ${m === 'open' ? 'infinite' : '≈ 0 Ω'} resistance` }); syncFuelBtns(); }
+function setBurn(x) { V.fuelMult = x; syncFuelBtns(); }
+function syncFuelBtns() { document.querySelectorAll('#burnSeg [data-burn]').forEach((b) => b.classList.toggle('on', Number(b.dataset.burn) === V.fuelMult)); document.querySelectorAll('[data-sender]').forEach((b) => b.classList.toggle('on', b.dataset.sender === V.sender && V.sender !== 'ok')); }
+$('refuelFull').onclick = () => refuel(80); $('refuel20').onclick = () => refuel(20);
+document.querySelectorAll('[data-burn]').forEach((b) => (b.onclick = () => setBurn(Number(b.dataset.burn))));
+document.querySelectorAll('[data-sender]').forEach((b) => (b.onclick = () => setSender(b.dataset.sender)));
+function sampleFuel() {
+  if (SIM.t - fhLast < 0.2 && SIM.t >= fhLast) return; fhLast = SIM.t;
+  const e2 = rxv('IPC', 0x120); const st = NODE.IPC.st;
+  FH.push({ t: SIM.t, truth: V.fuel, raw: e2.fresh && e2.v.SenderFault === 'ok' ? e2.v.FuelLevel : null, gauge: st.fuelValid ? st.gauge : null });
+  while (FH.length && FH[0].t < SIM.t - 120) FH.shift();
+}
+const fc = $('fuelChart'), fx = fc.getContext('2d');
+function drawFuel() {
+  const W = fc.width, H = fc.height, x0 = 60, x1 = W - 12, y0 = 18, y1 = H - 46; fx.fillStyle = '#050a12'; fx.fillRect(0, 0, W, H);
+  const T1 = SIM.t, T0 = T1 - 120; const X = (t) => x0 + (t - T0) / 120 * (x1 - x0); const Y = (v) => y1 - v / 100 * (y1 - y0);
+  fx.font = '17px ui-monospace,monospace'; fx.fillStyle = '#64748b'; fx.strokeStyle = '#1e293b'; fx.lineWidth = 1;
+  for (const v of [0, 25, 50, 75, 100]) { fx.beginPath(); fx.moveTo(x0, Y(v)); fx.lineTo(x1, Y(v)); fx.stroke(); fx.fillText(v + '%', 4, Y(v) + 5); }
+  fx.fillStyle = 'rgba(245,158,11,.08)'; fx.fillRect(x0, Y(11 / 80 * 100), x1 - x0, y1 - Y(11 / 80 * 100));
+  const plot = (k, col, w, dash) => { fx.strokeStyle = col; fx.lineWidth = w; fx.setLineDash(dash || []); fx.beginPath(); let pen = false; for (const p of FH) { if (p[k] == null) { pen = false; continue; } const xx = X(p.t), yy = Y(p[k]); if (!pen) { fx.moveTo(xx, yy); pen = true; } else fx.lineTo(xx, yy); } fx.stroke(); fx.setLineDash([]); };
+  plot('truth', '#94a3b8', 2, [8, 6]); plot('raw', '#f97316', 2); plot('gauge', '#22c55e', 4);
+  fx.font = '18px system-ui'; const leg = [['#94a3b8', 'fuel in tank (truth)'], ['#f97316', 'raw level (PCM 0x120)'], ['#22c55e', 'cluster gauge (damped)']];
+  leg.forEach(([c, t], i) => { const lx = x0 + [0, 250, 500][i]; fx.fillStyle = c; fx.fillRect(lx, H - 30, 22, 5); fx.fillStyle = '#cbd5e1'; fx.fillText(t, lx + 28, H - 22); });
+  fx.fillStyle = '#64748b'; fx.font = '15px ui-monospace,monospace'; fx.fillText('last 120 s of bus time · shaded band = low-fuel zone (< 11 L)', x0, 14);
+  const st = NODE.IPC.st; const e2 = rxv('IPC', 0x120); const fs = pcmFuelSender();
+  const kv = [['fuel in tank (truth)', `${V.fuelL.toFixed(1)} L / ${V.tankL} L`], ['sender resistance', V.sender === 'open' ? '∞ (open)' : V.sender === 'short' ? '≈ 0 Ω (short)' : `${senderOhms().toFixed(0)} Ω`], ['PCM raw level (0x120)', e2.v ? (e2.v.SenderFault === 'ok' ? `${e2.v.FuelLevel.toFixed(1)} %` : `fault: ${e2.v.SenderFault}`) : '---'],
+    ['IPC gauge', st.fuelValid ? `${st.gauge.toFixed(1)} %${st.fastFill ? ' (fast-fill)' : ''}` : '--- (invalid)'], ['fuel rate (0x128)', `${(st.rate ?? 0).toFixed(2)} L/h${st.inst != null ? ' · ' + st.inst.toFixed(1) + ' L/100 km now' : ''}`], ['average (learned by IPC)', `${(st.avg ?? 0).toFixed(1)} L/100 km`],
+    ['distance to empty', st.dte != null ? `${st.dte} km` : '---'], ['low-fuel warning', st.lowFuel ? 'ON' : 'off'], ['burn rate', `×${V.fuelMult}`]];
+  $('fuelKV').innerHTML = kv.map(([a, b]) => `<span>${a}</span><span>${b}</span>`).join('');
+  const tag = $('fuelTag'); tag.textContent = V.sender !== 'ok' ? 'SENDER FAULT' : st.lowFuel ? 'LOW FUEL' : 'ok'; tag.className = 'tag ' + (V.sender !== 'ok' ? 'o' : st.lowFuel ? 'p' : 'ok');
 }
 
 // ───────────────────────── inspector ─────────────────────────
@@ -1871,7 +2052,7 @@ $('aboutBody').innerHTML = `
 // ───────────────────────── narrated scenarios ─────────────────────────
 const sleepW = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(f, maxWallMs = 8000) { const t0 = performance.now(); while (!f() && performance.now() - t0 < maxWallMs) await sleepW(60); return f(); }
-function prep(opts = {}) { repairAll(); setStretch(1); UI.focusId = null; renderLegend(); if (V.ign !== 'RUN') setIgn('RUN'); if (!V.eng) { V.eng = true; V.rpm = 800; } V.sel = opts.sel ?? 'P'; V.v = opts.v ?? 0; V.autoSpd = opts.auto ?? 0; V.thr = 0; V.brk = 0; V.acc = { on: false, set: false, setSpd: 0, state: 'off' }; V.lead = 0; V.modeReq = V.mode = '2H'; V.trailer = false; V.locked = false; V.doors = [0, 0, 0, 0, 0, 0]; V.obst = 250; syncControls(); }
+function prep(opts = {}) { repairAll(); V.remote = false; setStretch(1); UI.focusId = null; renderLegend(); if (V.ign !== 'RUN') setIgn('RUN'); if (!V.eng) { V.eng = true; V.rpm = 800; } V.sel = opts.sel ?? 'P'; V.v = opts.v ?? 0; V.autoSpd = opts.auto ?? 0; V.thr = 0; V.brk = 0; V.acc = { on: false, set: false, setSpd: 0, state: 'off' }; V.lead = 0; V.modeReq = V.mode = '2H'; V.trailer = false; V.locked = false; V.doors = [0, 0, 0, 0, 0, 0]; V.obst = 250; V.fuelMult = 1; V.sender = 'ok'; if (opts.fuel != null) V.fuelL = opts.fuel; syncControls(); syncFuelBtns(); }
 const SCEN = {
   tour: { t: 'The networks and the gateway', s: [
     { x: 'This PX3 Wildtrak model has <b>four CAN buses</b> and three <b>LIN</b> sub-buses. <b style="color:#38bdf8">HS-CAN1</b> (500 kbit/s) links the powertrain and chassis: PCM, TCM, ABS/ESC, RCM, EPAS and the 4×4 module. Each frame you see is one module broadcasting; every other node on the bus receives it.', a: () => { prep(); setCam('iso'); } },
@@ -1958,6 +2139,16 @@ const SCEN = {
     { x: 'Now <b>UDS</b> (ISO 14229) to a module that is not on the DLC: the IPC on HS-CAN3. The tester addresses 0x720; the <b>gateway routes</b> the request across and the 0x728 responses back. <code>19 02 FF</code> = ReadDTCInformation, reportDTCByStatusMask.', a: async () => { await sleepW(800); $('fcBS').value = '0'; $('fcST').value = '0'; $('dTarget').value = 'IPC'; sendReq('1902FF'); } },
     { x: 'Each DTC comes back as 3 bytes (SAE J2012 code + failure type) plus a status byte (bit 0 testFailed, bit 3 confirmed…). Cause a fault, such as powering off the ABS, and read again to see U0121. Done.', a: () => {} },
   ] },
+  fuel: { t: 'Fuel level management', s: [
+    { x: 'From float to needle. The 80 L tank sits between the frame rails. Inside it a <b>float</b> moves a wiper along a resistor card (illustrative: 160 Ω empty … 15 Ω full). The sender is <b>hard-wired to the PCM</b>, not on CAN. Watch the orange fuel in the tank and the chart on the Cluster tab.', a: () => { prep({ sel: 'D', auto: 90, fuel: 20 }); showPane('cluster'); $('fuelCard').scrollIntoView({ block: 'start' }); focusPos([TANK.x, TANK.y + 0.2, TANK.z], 4.2); } },
+    { x: 'The PCM reads the resistance, checks it is in range, converts it to a level and broadcasts the <b>raw</b> value in <code>PCM_Engine2 0x120</code> every 100 ms. It also sends the fuel it injects in <code>PCM_FuelFlow 0x128</code>. The gateway forwards both to HS-CAN3, where the cluster lives.', a: () => { UI.focusId = 0x120; renderLegend(); } },
+    { x: 'Now a hard stop from 90 km/h. The fuel surges forward, the float bobs, and the <b>raw level</b> (orange) swings by many percent. The <b>gauge</b> (green) barely moves: the cluster runs the raw value through a slow filter (time constant ~40 s), so the needle doesn\'t dance on every bump and corner.', a: async () => { await until(() => Math.abs(V.v) * 3.6 > 80, 6000); V.autoSpd = 0; V.brk = 100; syncControls(); await sleepW(2500); V.brk = 0; V.autoSpd = 90; syncControls(); } },
+    { x: 'Range comes from <b>consumption</b>. The cluster sums the millilitres in 0x128 (a rolling 16-bit counter) against the distance from the ABS speed, learns an average in L/100 km, and divides the gauge litres (less a hidden ~4 L reserve) by it: <b>distance to empty</b>. Burn is now ×100, so the last quarter-tank goes in about a minute. The multiplier also shortens the cluster\'s filter by the same factor, so the gauge keeps pace.', a: () => { UI.focusId = null; renderLegend(); setBurn(100); } },
+    { x: 'Below about 11 L on the gauge the cluster raises <b>LOW FUEL</b>: the amber telltale, a chime request in <code>IPC_Info 0x3C0</code>, and a warning SYNC can show. The decision is made from the <i>damped</i> gauge, so a slosh cannot trigger it.', a: async () => { await until(() => NODE.IPC.st.lowFuel, 60000); setBurn(1); } },
+    { x: 'A corroded connector on the tank opens the sender circuit. The PCM now reads infinite resistance, which is out of range, so it sets <b>P0463</b> (Fuel Level Sensor "A" Circuit High), reports <code>SenderFault = open</code> and sends level 0. The cluster does <b>not</b> show "empty": it shows <b>"---"</b> and flashes the fuel lamp, because it was told the reading is invalid.', a: () => setSender('open') },
+    { x: 'OBD mode 03 from the DLC shows the stored code. P046x codes are emissions-relevant on many vehicles, because the evaporative-system monitor needs the fuel level.', a: async () => { showPane('diag'); $('dTarget').value = 'OBD'; await sleepW(300); sendReq('03'); } },
+    { x: 'Fix the connector, stop and refuel. The float rises at once, but a normal 40 s filter would take minutes to follow. The cluster sees a big rise <b>while stationary</b> and switches to <b>fast-fill</b>, so the gauge climbs in a few seconds. Finally, OBD PID <code>01 2F</code> reads the PCM\'s fuel-level input directly.', a: async () => { setSender('ok'); V.autoSpd = 0; V.brk = 100; syncControls(); showPane('cluster'); await until(() => Math.abs(V.v) < 0.3, 8000); V.sel = 'P'; V.brk = 0; syncControls(); setBurn(1); await sleepW(800); refuel(80); await sleepW(4000); showPane('diag'); sendReq('012F'); } },
+  ] },
   drive4x4: { t: '4×4 shift: 2H → 4H → 4L', s: [
     { x: 'The 4×4 selector switch is wired to the <b>4×4 control module</b>, but the module will not move the transfer case on the switch alone. It needs <b>vehicle speed</b> (ABS 0x0A0) and the <b>selector position</b> (TCM 0x110) from HS-CAN1.', a: () => { prep({ sel: 'D', v: 40 / 3.6, auto: 40 }); showPane('cluster'); focusPos(NODE.TC4.pos, 2.4); } },
     { x: 'Select <b>4H</b> at 40 km/h: allowed on the fly. The module drives the shift motor (⟳ on the cluster) and reports 4H in TC4_Status 0x130, which the gateway forwards to the cluster.', a: () => { V.modeReq = '4H'; syncControls(); } },
@@ -1982,7 +2173,7 @@ $('storyStop').onclick = () => { scen = null; $('story').style.display = 'none';
 // ───────────────────────── pane refresh + main loop ─────────────────────────
 let lastPaneT = 0, lastStripT = 0;
 function refreshPane(force) {
-  if (pane === 'cluster') { drawCluster(); renderAges(); }
+  if (pane === 'cluster') { drawCluster(); renderAges(); drawFuel(); }
   if (pane === 'info') renderInfo();
   if (pane === 'log' && (!LOGF.freeze || force)) renderLog();
   if (pane === 'frame' && force && !decSel) { const e = [...LOG].reverse().find((x) => x.kind === 'data' && x.id === 0x0A0); decodeFrame(0x0A0, e ? e.data : encode(0x0A0, {}), e); }
@@ -1992,10 +2183,10 @@ function refreshPane(force) {
 }
 let lastNow = performance.now(); let frameCount = 0;
 function loop(now) {
-  const wdt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now; UI.wall += wdt; frameCount++;
+  const wdt = Math.min(0.25, (now - lastNow) / 1000); lastNow = now; UI.wall += wdt; frameCount++;
   try {
     if (!UI.paused) runUntil(SIM.t + wdt / UI.stretch);
-    measureRates();
+    measureRates(); sampleFuel();
     if (camTween) { camTween.k = Math.min(1, camTween.k + wdt * 1.6); const e = 1 - Math.pow(1 - camTween.k, 3); camera.position.lerpVectors(camTween.p0, camTween.p1, e); controls.target.lerpVectors(camTween.t0, camTween.t1, e); if (camTween.k >= 1) camTween = null; }
     controls.update(); updateAnims(); updateTruckVisuals(wdt); renderer.render(scene, camera); updateLabels();
     if (now - lastStripT > 200) { lastStripT = now; renderStrip(); renderModeBadge(); updateControlOutputs(); }
@@ -2006,7 +2197,7 @@ function loop(now) {
 requestAnimationFrame(loop);
 window.addEventListener('error', (e) => window.__errors.push(String(e.message)));
 // test / automation hook
-window.__app = { SIM, BUS, NODE, V, LOG, MSGS, CORE, TOOL, UI, rxv, busLoad, showPane, startScen, sendReq, busFault, nodeFault, sensorEvent, setStretch, decodeLatest, arbDemo, fob, SCEN, get frames() { return frameCount; }, get anims() { return anims.length; } };
+window.__app = { SIM, BUS, NODE, V, LOG, MSGS, CORE, TOOL, UI, rxv, busLoad, showPane, startScen, sendReq, busFault, nodeFault, sensorEvent, refuel, setSender, setBurn, setStretch, decodeLatest, arbDemo, fob, SCEN, get frames() { return frameCount; }, get anims() { return anims.length; } };
 if (QS.get('scen')) setTimeout(() => startScen(QS.get('scen')), 500);
 if (QS.get('pane')) showPane(QS.get('pane'));
 </script>
