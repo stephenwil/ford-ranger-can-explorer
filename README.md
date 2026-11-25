@@ -15,7 +15,9 @@ panels on the right.
 
 ## Run it
 
-It is a static page: one HTML file plus a vendored copy of three.js. Serve the folder and open `index.html`:
+**Live:** https://stephenwil.github.io/ford-ranger-can-explorer/ (GitHub Pages, served from `main`).
+
+It is a static page (one HTML file plus a vendored copy of three.js). To run it locally, serve the folder and open `index.html`:
 
 ```bash
 python3 -m http.server 8431 --bind 0.0.0.0
