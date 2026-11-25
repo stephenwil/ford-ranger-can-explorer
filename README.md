@@ -67,3 +67,7 @@ vendor/                  three.js r170 module build + OrbitControls (MIT)
 docs/TECHNICAL_MANUAL.md architecture, CAN concepts, the model, and its limits
 tests/                   core_test.mjs (Node), ui_smoke.mjs (Playwright)
 ```
+
+## Licence
+
+MIT; see [LICENSE](LICENSE). The vendored three.js and OrbitControls in `vendor/` are MIT-licensed by the three.js authors.
